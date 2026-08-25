@@ -107,6 +107,26 @@ def cmd_info(jlink, args):
     return 0
 
 
+def verify_sector_size(jlink) -> None:
+    """Fails loudly if the card's real sector size (queried via INFO)
+    doesn't match the SECTOR_SIZE constant all of this tool's chunking math
+    assumes -- rather than silently doing the wrong sector-boundary math.
+    If INFO itself fails (no card yet), does nothing; the calling command
+    will hit its own natural error.
+    """
+    status, payload = transact(jlink, proto.OP_INFO, 0, 0, expected_payload_len=8)
+    if status != proto.STATUS_OK:
+        return
+    sector_size = int.from_bytes(payload[4:8], "little")
+    if sector_size != proto.SECTOR_SIZE:
+        sys.exit(
+            f"Card reports sector_size={sector_size}, but this tool assumes "
+            f"{proto.SECTOR_SIZE} throughout its chunking logic -- refusing "
+            "to proceed rather than risk corrupting data with the wrong "
+            "sector-boundary math."
+        )
+
+
 def _print_progress(done: int, total: int) -> None:
     """Renders an in-place text progress bar to stderr. Call with done==total
     last to print the final 100% state and its trailing newline."""
@@ -274,6 +294,16 @@ def cmd_restore(jlink, args):
     return 0
 
 
+def _sector_type(value):
+    try:
+        return proto.parse_sector_or_offset(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+
+_SECTOR_HELP = "sector number, or a size offset like '2M'/'512K'/'1G'"
+
+
 def build_parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--device", default=DEFAULT_DEVICE,
@@ -284,17 +314,17 @@ def build_parser():
 
     p_read = sub.add_parser(
         "read", help="read back a file previously written with `write` (size is auto-detected)")
-    p_read.add_argument("sector", type=int)
+    p_read.add_argument("sector", type=_sector_type, help=_SECTOR_HELP)
     p_read.add_argument("-o", "--output", required=True)
 
     p_write = sub.add_parser(
         "write", help="write a file starting at sector (embeds a length header for `read`)")
-    p_write.add_argument("sector", type=int)
+    p_write.add_argument("sector", type=_sector_type, help=_SECTOR_HELP)
     p_write.add_argument("-i", "--input", required=True)
 
     p_raw_read = sub.add_parser(
         "raw-read", help="read an explicit sector count, no header (for data not written by `write`)")
-    p_raw_read.add_argument("sector", type=int)
+    p_raw_read.add_argument("sector", type=_sector_type, help=_SECTOR_HELP)
     p_raw_read.add_argument("count", type=int)
     p_raw_read.add_argument("-o", "--output", required=True)
 
@@ -313,6 +343,7 @@ def main():
     try:
         if args.cmd == "info":
             return cmd_info(jlink, args)
+        verify_sector_size(jlink)
         if args.cmd == "read":
             return cmd_read(jlink, args)
         if args.cmd == "write":

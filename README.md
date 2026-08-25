@@ -166,6 +166,24 @@ Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
 on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
 it: `sdrtt.py --device <name> info`.
 
+**Sector size is 512 bytes**, the SD/SDHC/SDXC standard, hardcoded as
+`SECTOR_SIZE` in `host/protocol.py` and `SD_SECTOR_SIZE` in
+`firmware/src/sd_block.h`. You can check what a card actually reports via
+`sdrtt.py info`'s `sector_size=` output. Before any `read`/`write`/
+`raw-read`/`dump`/`restore`, the tool also queries this itself and refuses
+to proceed if it ever disagrees with the hardcoded value (a real card
+reporting something other than 512 essentially never happens with SD
+hardware, but silently doing the wrong sector-boundary math would be worse
+than refusing outright).
+
+**`sector` accepts a size offset instead of a raw sector number** on
+`read`/`write`/`raw-read` — `2M`, `512K`, `1G` (decimals allowed, e.g.
+`1.5M`, case-insensitive, optional trailing `B`), converted to a sector
+number before anything else runs. `sdrtt.py write 2M -i secret.bin` is
+exactly `sdrtt.py write 4096 -i secret.bin`. An offset that isn't an exact
+multiple of 512 bytes is rejected with the nearest valid sector numbers on
+either side, rather than silently rounding.
+
 Any `write`/`read`/`raw-read`/`dump`/`restore` transfer spanning more than
 one RTT request (>32 sectors, 16KB) prints a live progress bar to stderr
 (`[####------] 42% (21/50 sectors)`) so a large `dump` doesn't sit silent.

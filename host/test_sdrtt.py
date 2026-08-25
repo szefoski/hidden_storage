@@ -133,6 +133,41 @@ def test_progress_for_skips_single_chunk_transfers():
     assert sdrtt._progress_for(proto.MAX_XFER_SECTORS + 1) is sdrtt._print_progress
 
 
+def test_verify_sector_size_mismatch_exits():
+    fw = FakeFirmware(sector_size=4096, card_present=True)
+    try:
+        sdrtt.verify_sector_size(fw)
+        assert False, "expected SystemExit on a sector-size mismatch"
+    except SystemExit:
+        pass
+
+
+def test_verify_sector_size_match_is_a_no_op():
+    fw = FakeFirmware(sector_size=512, card_present=True)
+    sdrtt.verify_sector_size(fw)  # must not raise/exit
+
+
+def test_verify_sector_size_skipped_when_card_absent():
+    # INFO itself fails (no card) -> nothing to compare, check is a no-op,
+    # letting the calling command hit its own natural error instead.
+    fw = FakeFirmware(card_present=False)
+    sdrtt.verify_sector_size(fw)  # must not raise/exit
+
+
+def test_cli_sector_argument_accepts_offset_on_all_three_subcommands():
+    parser = sdrtt.build_parser()
+    expected_sector = (2 * 1024 * 1024) // proto.SECTOR_SIZE  # 2M
+
+    args = parser.parse_args(["read", "2M", "-o", "/tmp/x"])
+    assert args.sector == expected_sector
+
+    args = parser.parse_args(["write", "2M", "-i", "/tmp/x"])
+    assert args.sector == expected_sector
+
+    args = parser.parse_args(["raw-read", "2M", "1", "-o", "/tmp/x"])
+    assert args.sector == expected_sector
+
+
 def test_write_read_error_when_card_absent():
     # Regression test for the real bug found on hardware: firmware's READ
     # error response used to omit the payload while the host always expects

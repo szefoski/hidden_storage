@@ -72,6 +72,45 @@ def test_parse_header_rejects_short_input():
     assert not ok
 
 
+def test_parse_sector_or_offset_plain_int():
+    assert proto.parse_sector_or_offset("1000") == 1000
+    assert proto.parse_sector_or_offset("0") == 0
+
+
+def test_parse_sector_or_offset_size_suffixes():
+    assert proto.parse_sector_or_offset("512K") == (512 * 1024) // proto.SECTOR_SIZE
+    assert proto.parse_sector_or_offset("2M") == (2 * 1024 * 1024) // proto.SECTOR_SIZE
+    assert proto.parse_sector_or_offset("1G") == (1024 * 1024 * 1024) // proto.SECTOR_SIZE
+
+
+def test_parse_sector_or_offset_case_and_b_suffix():
+    assert proto.parse_sector_or_offset("2m") == proto.parse_sector_or_offset("2M")
+    assert proto.parse_sector_or_offset("2MB") == proto.parse_sector_or_offset("2M")
+    assert proto.parse_sector_or_offset("2mb") == proto.parse_sector_or_offset("2M")
+
+
+def test_parse_sector_or_offset_decimal():
+    # 1.5 MiB = 1572864 bytes = 3072 sectors of 512 bytes, exact.
+    assert proto.parse_sector_or_offset("1.5M") == 1572864 // proto.SECTOR_SIZE
+
+
+def test_parse_sector_or_offset_rejects_unaligned():
+    # 0.001M = 1048.576 bytes -- not a multiple of the 512-byte sector size.
+    try:
+        proto.parse_sector_or_offset("0.001M")
+        assert False, "expected ValueError for a non-sector-aligned offset"
+    except ValueError as e:
+        assert "not a multiple" in str(e)
+
+
+def test_parse_sector_or_offset_rejects_garbage():
+    try:
+        proto.parse_sector_or_offset("not-a-number")
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
 if __name__ == "__main__":
     import sys
 

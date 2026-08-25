@@ -3,6 +3,7 @@
 Request:  [opcode:1][sector:4 LE][count:2 LE][payload...][crc16:2 LE]
 Response: [opcode|0x80:1][status:1][payload...][crc16:2 LE]
 """
+import re
 import struct
 
 SECTOR_SIZE = 512
@@ -88,3 +89,48 @@ def parse_header(data: bytes):
         return False, 0
     (length,) = struct.unpack("<Q", data[4:12])
     return True, length
+
+
+# --- Sector-or-offset addressing for sdrtt.py's CLI ---------------------
+#
+# Lets `write`/`read`/`raw-read` take either a bare sector number (unchanged
+# from before) or a human-friendly size-suffixed byte offset like "2M",
+# converted to a sector number here before anything else runs.
+
+_SIZE_MULTIPLIERS = {"k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}
+_SIZE_RE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([KkMmGg])[Bb]?\s*$")
+
+
+def parse_sector_or_offset(value: str) -> int:
+    """Returns a sector number from either a bare integer string (passed
+    through unchanged) or a size-suffixed byte offset ("2M", "512K", "1G",
+    decimals allowed, case-insensitive, optional trailing "B"). Raises
+    ValueError with a clear message on anything else, and on a
+    size-suffixed offset that isn't an exact multiple of SECTOR_SIZE
+    (refuses to guess/round rather than silently landing on the wrong
+    sector)."""
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value)
+
+    m = _SIZE_RE.match(value)
+    if not m:
+        raise ValueError(
+            f"'{value}' is not a valid sector number or size offset "
+            "(expected a plain integer, or e.g. '2M', '512K', '1G')"
+        )
+
+    number_str, unit = m.group(1), m.group(2).lower()
+    byte_offset = round(float(number_str) * _SIZE_MULTIPLIERS[unit])
+
+    if byte_offset % SECTOR_SIZE != 0:
+        lo = (byte_offset // SECTOR_SIZE) * SECTOR_SIZE
+        hi = lo + SECTOR_SIZE
+        raise ValueError(
+            f"'{value}' ({byte_offset} bytes) is not a multiple of the "
+            f"{SECTOR_SIZE}-byte sector size -- nearest valid offsets are "
+            f"{lo} bytes (sector {lo // SECTOR_SIZE}) or "
+            f"{hi} bytes (sector {hi // SECTOR_SIZE})"
+        )
+
+    return byte_offset // SECTOR_SIZE

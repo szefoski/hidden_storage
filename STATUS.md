@@ -75,6 +75,21 @@ official Windows wheels, so it isn't actually the portability gap here.
 README now has a Windows/PowerShell command block alongside the Linux/macOS
 one -- **not tested on real Windows**, direct translation only.
 
+**Sector-size safety check + byte/MB offset addressing:** `sdrtt.py` now
+queries the card's real sector size via `INFO` before any
+`read`/`write`/`raw-read`/`dump`/`restore` and refuses to proceed if it ever
+disagrees with the hardcoded 512-byte `SECTOR_SIZE` constant, rather than
+silently doing the wrong sector-boundary math. Chose validate-and-fail-loudly
+over threading a dynamic sector size through firmware buffers/RTT
+framing/host chunking -- real SD/SDHC/SDXC cards are universally 512-byte
+block-addressed by spec, so full adaptation isn't worth the added surface
+for a case that essentially never happens. Also: `sector` on
+`read`/`write`/`raw-read` now accepts a size-suffixed offset (`2M`, `512K`,
+`1G`) as an alternative to a raw sector number
+(`protocol.parse_sector_or_offset`), converted before anything else runs;
+a non-sector-aligned offset is rejected with the nearest valid sector
+numbers rather than silently rounded. 29 tests passing (up from 19).
+
 ## Discoveries / gotchas found along the way
 
 - **Kconfig for disk access is `CONFIG_DISK_ACCESS`, not `CONFIG_DISK_DRIVERS`.**
