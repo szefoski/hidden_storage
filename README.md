@@ -60,5 +60,9 @@ python3 host/test_protocol.py     # hardware-free protocol round-trip tests
 python3 host/sdrtt.py info        # requires flashed board connected via J-Link
 ```
 
-If `--device NRF54L15_XXAA` (the default) isn't accepted by your J-Link,
-override it: `python3 host/sdrtt.py --device <name> info`.
+Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
+on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
+it: `python3 host/sdrtt.py --device <name> info`.
+
+On Debian/Ubuntu, `pip install` into system Python is blocked (PEP 668) — use
+a venv: `python3 -m venv host/.venv && host/.venv/bin/pip install -r host/requirements.txt`.

@@ -13,7 +13,7 @@ import pylink
 import protocol as proto
 
 RTT_CHANNEL = 1
-DEFAULT_DEVICE = "NRF54L15_XXAA"
+DEFAULT_DEVICE = "NRF54L15_M33"
 
 
 def connect(device: str) -> pylink.JLink:

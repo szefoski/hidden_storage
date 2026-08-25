@@ -2,14 +2,31 @@
 
 ## Current state (2026-08-25)
 
-Firmware **builds and links successfully** against NCS v3.4.0 / Zephyr 4.4.0 for
-`nrf54l15dk/nrf54l15/cpuapp` (54.5 KB flash, 95 KB RAM used). Not yet flashed or
-tested on real hardware — **blocked on the SD card reader/breakout module
-delivery.**
+Firmware **builds, flashes, and runs on the real nRF54L15-DK.** RTT link to
+the host is confirmed working end-to-end: `sdrtt.py info` connects, sends a
+framed request, and gets back a correctly-CRC'd response. It reports
+`STATUS_ERROR` because no SD card is wired up yet — that's the expected,
+correct behavior (`disk_access_init()` fails cleanly, firmware surfaces the
+error instead of hanging).
 
-Host-side protocol code (`host/protocol.py`) is unit-tested and passing without
-hardware (`python3 host/test_protocol.py`). `host/sdrtt.py` (the RTT CLI) is
-written but unexercised — needs a flashed board to test against.
+Also confirmed the actual point of the project: with the board flashed and
+RTT traffic flowing, `lsusb` shows only the J-Link debug probe
+(`1366:1069 SEGGER J-Link`) — no mass-storage or other device appears. This
+was checked with no SD card present, so it's not full confirmation (the
+concern would be if enumerating an SD card via SPI at runtime somehow
+triggered a new device — it can't, since there's no USB device stack in this
+firmware at all, but worth a final sanity check once the card is wired up
+too).
+
+**Blocked on the SD card reader/breakout module delivery** for the SPI/SD
+electrical bring-up (wiring, pin numbers in the overlay, and the actual
+`disk_access_init()` success path).
+
+Host-side protocol code (`host/protocol.py`) is unit-tested and passing
+without hardware (`python3 host/test_protocol.py`). `host/sdrtt.py` (the RTT
+CLI) is confirmed working against real hardware for the `info` command; the
+`read`/`write`/`dump`/`restore` paths are written but need a working SD card
+to exercise (they depend on `disk_access_read/write` succeeding).
 
 ## Discoveries / gotchas found along the way
 
@@ -36,6 +53,11 @@ written but unexercised — needs a flashed board to test against.
   official CLI installer — see [README.md](README.md) for exact commands.
   Needed to free ~5GB (pip cache) first on this machine before the SDK +
   toolchain download would fit.
+- The J-Link device name for pylink's `jlink.connect()` is **`NRF54L15_M33`**,
+  not `NRF54L15_XXAA` as originally guessed — found by probing with
+  `JLinkExe` directly. `host/sdrtt.py`'s default is updated to match.
+- `pip install` into system Python is blocked by Debian/Ubuntu's PEP 668
+  guard; use a venv for the host tool (`host/.venv`, see README).
 
 ## How to build / use
 
@@ -49,14 +71,15 @@ host tool usage are all there and confirmed working through the build step.
 2. Update the placeholder pin numbers and `cs-gpios` in
    `firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` to match the actual
    wiring.
-3. Flash: `west flash -d firmware/build` (via the `nrfutil sdk-manager
-   toolchain launch` wrapper — see README).
-4. Run `python3 host/sdrtt.py info` — first real test of the RTT link *and*
-   the SD-over-SPI init. If `disk_access_init()` fails (see CMD8/CMD58 note
-   above), check wiring/pull-ups before touching firmware logic.
+3. Re-flash (same command as before, already confirmed working):
+   `nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- west flash -d firmware/build`
+4. Run `python3 host/sdrtt.py info` — RTT link is already proven working; this
+   run is specifically to test SD-over-SPI init. If `disk_access_init()`
+   fails (see CMD8/CMD58 note above), check wiring/pull-ups before touching
+   firmware logic.
 5. Once `info` reports sane sector size/count, test `read`/`write`/`dump`
    round-trips against a throwaway card (or spare sectors) before trusting it
    with real data.
-6. Confirm the actual "hidden" property end-to-end: watch the OS's disk/device
-   list while the board is connected and RTT traffic is flowing, confirm
-   nothing appears.
+6. Re-check `lsusb` with the card wired up and RTT traffic flowing, to
+   confirm nothing new appears now that real SPI/SD activity is happening
+   (expected: still just the J-Link probe, per the reasoning above).
