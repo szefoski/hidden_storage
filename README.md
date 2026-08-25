@@ -165,3 +165,9 @@ header involved.
 Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
 on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
 it: `sdrtt.py --device <name> info`.
+
+Any `write`/`read`/`raw-read`/`dump`/`restore` transfer spanning more than
+one RTT request (>32 sectors, 16KB) prints a live progress bar to stderr
+(`[####------] 42% (21/50 sectors)`) so a large `dump` doesn't sit silent.
+Small transfers that finish in a single request don't show one -- not worth
+the noise.

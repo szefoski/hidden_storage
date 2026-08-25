@@ -111,6 +111,28 @@ def test_dump_restore_roundtrip():
         os.unlink(img)
 
 
+def test_progress_callback_fires_for_multi_chunk_transfer():
+    fw = FakeFirmware(card_present=True)
+    calls = []
+    data = b"\x42" * (50 * proto.SECTOR_SIZE)  # 50 sectors, > MAX_XFER_SECTORS (32)
+
+    sdrtt.raw_write_sectors(fw, 0, data, progress=lambda done, total: calls.append((done, total)))
+
+    # Two chunks: 32 sectors then the remaining 18.
+    assert calls == [(32, 50), (50, 50)]
+
+    calls.clear()
+    sdrtt.raw_read_sectors(fw, 0, 50, progress=lambda done, total: calls.append((done, total)))
+    assert calls == [(32, 50), (50, 50)]
+
+
+def test_progress_for_skips_single_chunk_transfers():
+    # A transfer that fits in one RTT request isn't worth a progress bar.
+    assert sdrtt._progress_for(proto.MAX_XFER_SECTORS) is None
+    assert sdrtt._progress_for(1) is None
+    assert sdrtt._progress_for(proto.MAX_XFER_SECTORS + 1) is sdrtt._print_progress
+
+
 def test_write_read_error_when_card_absent():
     # Regression test for the real bug found on hardware: firmware's READ
     # error response used to omit the payload while the host always expects

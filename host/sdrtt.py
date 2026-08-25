@@ -107,11 +107,26 @@ def cmd_info(jlink, args):
     return 0
 
 
-def raw_read_sectors(jlink, sector: int, count: int) -> bytes:
+def _print_progress(done: int, total: int) -> None:
+    """Renders an in-place text progress bar to stderr. Call with done==total
+    last to print the final 100% state and its trailing newline."""
+    width = 30
+    frac = done / total if total else 1.0
+    filled = int(width * frac)
+    bar = "#" * filled + "-" * (width - filled)
+    end = "\n" if done >= total else ""
+    print(f"\r[{bar}] {frac * 100:3.0f}% ({done}/{total} sectors)", end=end,
+          file=sys.stderr, flush=True)
+
+
+def raw_read_sectors(jlink, sector: int, count: int, progress=None) -> bytes:
     """Reads `count` sectors starting at `sector`, chunked under the wire
-    protocol's per-request cap. Raises RuntimeError on a non-OK status."""
+    protocol's per-request cap. Raises RuntimeError on a non-OK status.
+    If given, `progress(sectors_done, sectors_total)` is called after each
+    chunk."""
     out = bytearray()
     remaining = count
+    done = 0
     while remaining > 0:
         chunk = min(remaining, proto.MAX_XFER_SECTORS)
         status, payload = transact(
@@ -123,15 +138,21 @@ def raw_read_sectors(jlink, sector: int, count: int) -> bytes:
         out.extend(payload)
         sector += chunk
         remaining -= chunk
+        done += chunk
+        if progress:
+            progress(done, count)
     return bytes(out)
 
 
-def raw_write_sectors(jlink, sector: int, data: bytes) -> None:
+def raw_write_sectors(jlink, sector: int, data: bytes, progress=None) -> None:
     """Writes `data` (must already be a multiple of SECTOR_SIZE) starting at
-    `sector`, chunked under the wire protocol's per-request cap."""
+    `sector`, chunked under the wire protocol's per-request cap.
+    If given, `progress(sectors_done, sectors_total)` is called after each
+    chunk."""
     total_sectors = len(data) // proto.SECTOR_SIZE
     off = 0
     remaining = total_sectors
+    done = 0
     while remaining > 0:
         chunk = min(remaining, proto.MAX_XFER_SECTORS)
         payload = data[off:off + chunk * proto.SECTOR_SIZE]
@@ -141,6 +162,18 @@ def raw_write_sectors(jlink, sector: int, data: bytes) -> None:
         sector += chunk
         off += chunk * proto.SECTOR_SIZE
         remaining -= chunk
+        done += chunk
+        if progress:
+            progress(done, total_sectors)
+
+
+def _progress_for(total_sectors: int):
+    """Returns a progress callback for cmd_* to pass through, or None for
+    transfers small enough to finish in a single RTT request (not worth the
+    noise of a bar for those)."""
+    if total_sectors <= proto.MAX_XFER_SECTORS:
+        return None
+    return _print_progress
 
 
 def cmd_write(jlink, args):
@@ -154,7 +187,7 @@ def cmd_write(jlink, args):
     blob = blob.ljust(total_sectors * proto.SECTOR_SIZE, b"\x00")
 
     try:
-        raw_write_sectors(jlink, args.sector, blob)
+        raw_write_sectors(jlink, args.sector, blob, progress=_progress_for(total_sectors))
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
@@ -182,7 +215,7 @@ def cmd_read(jlink, args):
 
     total_sectors = (proto.HEADER_LEN + length + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
     try:
-        blob = raw_read_sectors(jlink, args.sector, total_sectors)
+        blob = raw_read_sectors(jlink, args.sector, total_sectors, progress=_progress_for(total_sectors))
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
@@ -199,7 +232,7 @@ def cmd_raw_read(jlink, args):
     """Explicit-count raw sector read, no header involved -- for data not
     written by `sdrtt.py write` (e.g. inspecting arbitrary card contents)."""
     try:
-        data = raw_read_sectors(jlink, args.sector, args.count)
+        data = raw_read_sectors(jlink, args.sector, args.count, progress=_progress_for(args.count))
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
@@ -215,7 +248,7 @@ def cmd_dump(jlink, args):
         return 1
     sector_count = int.from_bytes(payload[0:4], "little")
     try:
-        data = raw_read_sectors(jlink, 0, sector_count)
+        data = raw_read_sectors(jlink, 0, sector_count, progress=_progress_for(sector_count))
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
@@ -231,12 +264,13 @@ def cmd_restore(jlink, args):
               f"bytes -- refusing to guess padding for a whole-card restore.",
               file=sys.stderr)
         return 1
+    restore_sectors = len(data) // proto.SECTOR_SIZE
     try:
-        raw_write_sectors(jlink, 0, data)
+        raw_write_sectors(jlink, 0, data, progress=_progress_for(restore_sectors))
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
-    print(f"Restored {len(data) // proto.SECTOR_SIZE} sectors <- {args.input}")
+    print(f"Restored {restore_sectors} sectors <- {args.input}")
     return 0
 
 
