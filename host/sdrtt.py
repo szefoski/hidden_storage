@@ -7,6 +7,7 @@ buffer index 1 (buffer 0 is left for the normal Zephyr log/console).
 import argparse
 import sys
 import time
+from pathlib import Path
 
 import pylink
 
@@ -18,10 +19,27 @@ DEFAULT_DEVICE = "NRF54L15_M33"
 
 def connect(device: str) -> pylink.JLink:
     jlink = pylink.JLink()
-    jlink.open()
-    jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
-    jlink.connect(device)
-    jlink.rtt_start()
+    try:
+        jlink.open()
+    except TypeError as e:
+        # pylink raises TypeError (not its own JLinkException) when it can't
+        # find/load the SEGGER J-Link DLL/shared library at all -- give a
+        # clearer pointer than the raw pylink error in that case.
+        sys.exit(
+            "Could not load the SEGGER J-Link library. Install the J-Link "
+            "Software and Documentation Pack from segger.com/downloads/jlink "
+            f"and make sure it's on PATH.\n({e})"
+        )
+    try:
+        jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
+        jlink.connect(device)
+        jlink.rtt_start()
+    except pylink.errors.JLinkException as e:
+        sys.exit(
+            f"J-Link connect failed for device '{device}': {e}\n"
+            "Check the board is plugged in and not in use by another tool "
+            "(JLinkExe, a debugger, etc)."
+        )
 
     # Wait for the firmware's RTT control block to expose our channel.
     deadline = time.time() + 5.0
@@ -129,8 +147,7 @@ def cmd_write(jlink, args):
     """Writes a file starting at `sector`, prefixed with a length header so
     `read` can later recover exactly how many bytes/sectors to fetch without
     being told."""
-    with open(args.input, "rb") as f:
-        file_data = f.read()
+    file_data = Path(args.input).read_bytes()
 
     blob = proto.build_header(len(file_data)) + file_data
     total_sectors = (len(blob) + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
@@ -171,8 +188,7 @@ def cmd_read(jlink, args):
         return 1
 
     file_data = blob[proto.HEADER_LEN:proto.HEADER_LEN + length]
-    with open(args.output, "wb") as f:
-        f.write(file_data)
+    Path(args.output).write_bytes(file_data)
 
     print(f"Read {length} bytes ({total_sectors} sectors) "
           f"from sector {args.sector} -> {args.output}")
@@ -187,8 +203,7 @@ def cmd_raw_read(jlink, args):
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
-    with open(args.output, "wb") as f:
-        f.write(data)
+    Path(args.output).write_bytes(data)
     print(f"Read {args.count} raw sectors starting at {args.sector} -> {args.output}")
     return 0
 
@@ -204,15 +219,13 @@ def cmd_dump(jlink, args):
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
-    with open(args.output, "wb") as f:
-        f.write(data)
+    Path(args.output).write_bytes(data)
     print(f"Dumped {sector_count} sectors -> {args.output}")
     return 0
 
 
 def cmd_restore(jlink, args):
-    with open(args.input, "rb") as f:
-        data = f.read()
+    data = Path(args.input).read_bytes()
     if len(data) % proto.SECTOR_SIZE != 0:
         print(f"Image size {len(data)} is not a multiple of {proto.SECTOR_SIZE} "
               f"bytes -- refusing to guess padding for a whole-card restore.",

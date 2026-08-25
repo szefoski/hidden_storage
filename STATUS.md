@@ -61,6 +61,20 @@ the kind of bug that's easy to miss without hardware in the loop -- `write`
 and `info` happened to not hit it, since their response sizes were already
 status-independent.
 
+**Windows portability pass:** `host/*.py` were audited against the pattern
+used in the sibling `nRF54L15-storage` project (a related on-chip-RRAM
+storage tool of the user's) -- adopted `pathlib.Path` for all file I/O and
+added a clearer connection-failure error message pointing at the J-Link
+Software Pack download. Deliberately did *not* adopt that sibling project's
+"avoid pylink, shell out to JLinkExe directly" approach: that works for their
+tool because it only needs flash `loadfile`/`savebin`, which JLinkExe's CLI
+scripting handles fine, but our RTT-based bidirectional binary protocol has
+no clean CLI-scriptable equivalent (would mean hand-rolling the SEGGER RTT
+ring-buffer protocol via raw memory pokes). `pylink-square` already ships
+official Windows wheels, so it isn't actually the portability gap here.
+README now has a Windows/PowerShell command block alongside the Linux/macOS
+one -- **not tested on real Windows**, direct translation only.
+
 ## Discoveries / gotchas found along the way
 
 - **Kconfig for disk access is `CONFIG_DISK_ACCESS`, not `CONFIG_DISK_DRIVERS`.**

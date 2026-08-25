@@ -68,6 +68,21 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -
 
 ## Host tool
 
+The `host/` scripts (`sdrtt.py`, `protocol.py`, `fake_firmware.py`) are pure
+Python and platform-agnostic -- all file I/O goes through `pathlib.Path`, and
+the only third-party dependency is [`pylink-square`](https://pypi.org/project/pylink-square/),
+which SEGGER's own tooling recommends and which ships official wheels for
+Linux, macOS, *and Windows*. The firmware/build/flash steps above are
+Linux-only as documented (that's what this dev machine runs), but the host
+tool itself doesn't need to run on the same machine that built/flashed the
+firmware -- once a board is flashed, anything with J-Link software, Python,
+and USB access to the board can drive it.
+
+Requires [SEGGER's J-Link Software Pack](https://www.segger.com/downloads/jlink/)
+installed on whichever machine runs these (same requirement as above, any OS).
+
+### Linux / macOS
+
 Install into a venv (works everywhere; also the only option on Debian/Ubuntu,
 where `pip install` into system Python is blocked by PEP 668):
 
@@ -91,6 +106,53 @@ host/.venv/bin/python host/sdrtt.py dump  -o full_card.img      # whole-card raw
 host/.venv/bin/python host/sdrtt.py restore -i full_card.img    # write a whole-card image back
 ```
 
+### Windows
+
+Same tools, same commands -- just Windows paths/venv layout. **Not tested on
+an actual Windows machine** (this project was built entirely on Linux); this
+is a direct translation of the Linux instructions, not independently verified.
+None of these commands are PowerShell- or cmd-specific (no `$env:`, no
+line-continuation), so both shells below use identical lines -- provided
+separately anyway so each is directly copy-pasteable without translating.
+
+**PowerShell:**
+
+```powershell
+py -3 -m venv host\.venv
+host\.venv\Scripts\pip.exe install -r host\requirements.txt
+
+py -3 host\test_protocol.py                      # hardware-free, no venv needed
+host\.venv\Scripts\python.exe host\test_sdrtt.py  # hardware-free command-logic tests
+
+host\.venv\Scripts\python.exe host\sdrtt.py info
+host\.venv\Scripts\python.exe host\sdrtt.py write 1000 -i secret.bin
+host\.venv\Scripts\python.exe host\sdrtt.py read  1000 -o out.bin
+host\.venv\Scripts\python.exe host\sdrtt.py dump  -o full_card.img
+host\.venv\Scripts\python.exe host\sdrtt.py restore -i full_card.img
+```
+
+**cmd.exe:**
+
+```bat
+py -3 -m venv host\.venv
+host\.venv\Scripts\pip.exe install -r host\requirements.txt
+
+py -3 host\test_protocol.py
+host\.venv\Scripts\python.exe host\test_sdrtt.py
+
+host\.venv\Scripts\python.exe host\sdrtt.py info
+host\.venv\Scripts\python.exe host\sdrtt.py write 1000 -i secret.bin
+host\.venv\Scripts\python.exe host\sdrtt.py read 1000 -o out.bin
+host\.venv\Scripts\python.exe host\sdrtt.py dump -o full_card.img
+host\.venv\Scripts\python.exe host\sdrtt.py restore -i full_card.img
+```
+
+If `pylink`/the J-Link DLL fails to load, `sdrtt.py` now prints a direct
+pointer to the J-Link Software Pack download instead of pylink's raw error
+(same fix applies on Linux/macOS).
+
+### Usage notes (all platforms)
+
 `write` prepends a 12-byte header (`HSD1` magic + 8-byte length) before the
 file's bytes, so `read` can recover exactly how many bytes/sectors to fetch
 without being told a count. This lives only in `host/protocol.py`
@@ -102,4 +164,4 @@ header involved.
 
 Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
 on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
-it: `host/.venv/bin/python host/sdrtt.py --device <name> info`.
+it: `sdrtt.py --device <name> info`.
