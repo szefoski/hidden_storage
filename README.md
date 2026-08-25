@@ -57,6 +57,7 @@ expansion connector (spi22) to the SD breakout module before flashing.
 ```sh
 pip install -r host/requirements.txt
 python3 host/test_protocol.py     # hardware-free protocol round-trip tests
+python3 host/test_sdrtt.py        # hardware-free command-logic tests, via a firmware simulator
 python3 host/sdrtt.py info        # requires flashed board connected via J-Link
 python3 host/sdrtt.py write 1000 -i secret.bin    # write, starting at sector 1000
 python3 host/sdrtt.py read  1000 -o out.bin       # read it back -- size is auto-detected

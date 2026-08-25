@@ -30,6 +30,20 @@ clean `ERROR` status (no SD card wired up yet, so `disk_access_*` calls fail,
 but the framing/CRC/chunking/error-propagation all work). `dump`/`restore`
 are written but not yet exercised on hardware.
 
+**`host/fake_firmware.py`** is a hardware-free double for the firmware's
+frame-handling logic (`FakeFirmware`, mirroring `rtt_proto.c` + `main.c`'s
+dispatch, as a second independent implementation, not generated from the C).
+It exposes the same `rtt_write`/`rtt_read` interface `sdrtt.py` calls on a
+real `pylink.JLink`, so it can stand in for the board entirely.
+`host/test_sdrtt.py` (8 tests, all passing) exercises `info`/`write`/`read`/
+`raw-read`/`dump`/`restore` through it, including multi-chunk transfers
+(>32 sectors, forcing multiple RTT requests) and a regression test for the
+exact READ-response hang bug found on real hardware. Caveat documented in
+`fake_firmware.py`'s docstring: it's hand-maintained, not derived from the C,
+so it won't automatically catch a future firmware regression unless the
+double is updated to match -- it's real coverage for the host-side chunking/
+header/error-propagation logic, not a substitute for hardware testing.
+
 `write` now embeds a small length header (`host/protocol.py`:
 `build_header`/`parse_header`, host-side only, not part of the wire protocol)
 so `read` auto-detects how many bytes/sectors to fetch instead of requiring
