@@ -120,3 +120,19 @@ written up in [ENCRYPTION_PLAN.md](ENCRYPTION_PLAN.md). Deliberately not
 started yet: layering hardware-backed crypto onto a data path that hasn't
 seen a real SD card would make it hard to tell which layer broke if
 something failed. Pick this up after the raw-storage path above is solid.
+
+## Planned next improvement: store a git repository on the hidden storage (not started)
+
+Also queued for after the raw-storage path is confirmed: a host-side wrapper
+(`host/git_hidden.py`, no firmware changes) that uses `git bundle` --
+git's own format for offline/removable-media transport -- around the
+existing `write`/`read` commands. `push <sector>` snapshots refs into a
+bundle and writes it (full-state replace, not incremental); `fetch`/`clone
+<sector>` reads the bundle back and lets git unpack it natively, since git
+already treats a bundle file as a valid fetch/clone source. Full design in
+[GIT_STORAGE_PLAN.md](GIT_STORAGE_PLAN.md). Chosen over a full custom
+`git-remote-helper` protocol implementation -- our storage is a dumb blob
+store with no live git process on the other end, so push would be a
+whole-bundle replace either way; the extra protocol work would only buy UX
+polish (`git push card` instead of `git_hidden.py push <sector>`), not real
+incremental transfer.
