@@ -20,13 +20,17 @@ used here for both flashing and the RTT command link.
 ## Building the firmware
 
 The firmware app lives outside the `~/ncs/v3.4.0` west workspace, so point `west`
-at it explicitly:
+at it explicitly. Run this from the repo root -- **the paths must be absolute**:
+`--chdir ~/ncs/v3.4.0` changes directory before `west` runs, so a relative
+`firmware/build` would resolve against `~/ncs/v3.4.0`, not this repo (and fail
+with "source directory firmware does not exist").
 
 ```sh
+REPO="$(pwd)"
 nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- \
   west build -b nrf54l15dk/nrf54l15/cpuapp \
-  -d firmware/build \
-  firmware
+  -d "$REPO/firmware/build" \
+  "$REPO/firmware"
 ```
 
 Confirmed working (NCS v3.4.0 / Zephyr 4.4.0): links cleanly at 54.5 KB flash /
@@ -54,9 +58,12 @@ reports a clean error at runtime, which is expected and already validated.)
 
 ## Flashing
 
+Same absolute-path requirement as building:
+
 ```sh
+REPO="$(pwd)"
 nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- \
-  west flash -d firmware/build
+  west flash -d "$REPO/firmware/build"
 ```
 
 ## Host tool
