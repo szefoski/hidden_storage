@@ -64,3 +64,27 @@ def parse_response(frame: bytes):
 
 def status_name(status: int) -> str:
     return _STATUS_NAMES.get(status, f"0x{status:02x}")
+
+
+# --- Length header used by sdrtt.py's `write`/`read` commands (host-side only;
+# the RTT wire protocol above and the firmware know nothing about this) so
+# `read` can recover exactly how many bytes/sectors to fetch without the
+# caller needing to remember or pass a count.
+#
+# Layout: [magic:4]["HSD1"][length:8 LE] = 12 bytes, followed by the file's
+# raw bytes, the whole thing sector-padded on disk.
+HEADER_MAGIC = b"HSD1"
+HEADER_LEN = 12
+
+
+def build_header(length: int) -> bytes:
+    return HEADER_MAGIC + struct.pack("<Q", length)
+
+
+def parse_header(data: bytes):
+    """Returns (ok, length). ok is False if data doesn't start with our magic
+    (e.g. sector was never written by this tool, or holds unrelated data)."""
+    if len(data) < HEADER_LEN or data[:4] != HEADER_MAGIC:
+        return False, 0
+    (length,) = struct.unpack("<Q", data[4:12])
+    return True, length

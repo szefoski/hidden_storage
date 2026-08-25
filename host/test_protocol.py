@@ -45,6 +45,33 @@ def test_parse_response_bad_crc():
         pass
 
 
+def test_header_round_trip():
+    header = proto.build_header(12345)
+    assert len(header) == proto.HEADER_LEN
+    ok, length = proto.parse_header(header)
+    assert ok
+    assert length == 12345
+
+
+def test_header_round_trip_with_trailing_data():
+    header = proto.build_header(3)
+    blob = header + b"abc" + b"\x00" * 100  # simulates sector padding
+    ok, length = proto.parse_header(blob)
+    assert ok
+    assert length == 3
+    assert blob[proto.HEADER_LEN:proto.HEADER_LEN + length] == b"abc"
+
+
+def test_parse_header_rejects_garbage():
+    ok, _ = proto.parse_header(b"\x00" * 20)
+    assert not ok
+
+
+def test_parse_header_rejects_short_input():
+    ok, _ = proto.parse_header(b"HSD1\x01\x02")
+    assert not ok
+
+
 if __name__ == "__main__":
     import sys
 

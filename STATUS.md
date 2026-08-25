@@ -23,10 +23,29 @@ electrical bring-up (wiring, pin numbers in the overlay, and the actual
 `disk_access_init()` success path).
 
 Host-side protocol code (`host/protocol.py`) is unit-tested and passing
-without hardware (`python3 host/test_protocol.py`). `host/sdrtt.py` (the RTT
-CLI) is confirmed working against real hardware for the `info` command; the
-`read`/`write`/`dump`/`restore` paths are written but need a working SD card
-to exercise (they depend on `disk_access_read/write` succeeding).
+without hardware (`python3 host/test_protocol.py`, 9 tests). `host/sdrtt.py`
+(the RTT CLI) is confirmed working against real hardware for `info`, `write`,
+and `read` -- all three round-trip correctly over RTT and report the expected
+clean `ERROR` status (no SD card wired up yet, so `disk_access_*` calls fail,
+but the framing/CRC/chunking/error-propagation all work). `dump`/`restore`
+are written but not yet exercised on hardware.
+
+`write` now embeds a small length header (`host/protocol.py`:
+`build_header`/`parse_header`, host-side only, not part of the wire protocol)
+so `read` auto-detects how many bytes/sectors to fetch instead of requiring
+an explicit count. `dump`/`restore` stay header-free for byte-exact whole-card
+images; `raw-read` is the explicit-count escape hatch for sectors not written
+via `write`.
+
+**Real bug found and fixed while first exercising `read` on hardware:** the
+firmware's READ response omitted the payload entirely on error, but the host
+always expects a response sized to the sector count *it* requested --
+mismatched lengths made `read` hang until timeout instead of failing cleanly.
+Fixed in `firmware/src/main.c` by zero-filling and sending the full-size
+payload on error too (same pattern `INFO`'s response already used). This is
+the kind of bug that's easy to miss without hardware in the loop -- `write`
+and `info` happened to not hit it, since their response sizes were already
+status-independent.
 
 ## Discoveries / gotchas found along the way
 

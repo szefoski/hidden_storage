@@ -89,34 +89,29 @@ def cmd_info(jlink, args):
     return 0
 
 
-def cmd_read(jlink, args):
-    with open(args.output, "wb") as f:
-        remaining = args.count
-        sector = args.sector
-        while remaining > 0:
-            chunk = min(remaining, proto.MAX_XFER_SECTORS)
-            status, payload = transact(
-                jlink, proto.OP_READ, sector, chunk,
-                expected_payload_len=chunk * proto.SECTOR_SIZE,
-            )
-            if status != proto.STATUS_OK:
-                print(f"READ failed at sector {sector}: {proto.status_name(status)}",
-                      file=sys.stderr)
-                return 1
-            f.write(payload)
-            sector += chunk
-            remaining -= chunk
-    print(f"Read {args.count} sectors starting at {args.sector} -> {args.output}")
-    return 0
+def raw_read_sectors(jlink, sector: int, count: int) -> bytes:
+    """Reads `count` sectors starting at `sector`, chunked under the wire
+    protocol's per-request cap. Raises RuntimeError on a non-OK status."""
+    out = bytearray()
+    remaining = count
+    while remaining > 0:
+        chunk = min(remaining, proto.MAX_XFER_SECTORS)
+        status, payload = transact(
+            jlink, proto.OP_READ, sector, chunk,
+            expected_payload_len=chunk * proto.SECTOR_SIZE,
+        )
+        if status != proto.STATUS_OK:
+            raise RuntimeError(f"READ failed at sector {sector}: {proto.status_name(status)}")
+        out.extend(payload)
+        sector += chunk
+        remaining -= chunk
+    return bytes(out)
 
 
-def cmd_write(jlink, args):
-    with open(args.input, "rb") as f:
-        data = f.read()
-    total_sectors = (len(data) + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
-    data = data.ljust(total_sectors * proto.SECTOR_SIZE, b"\x00")
-
-    sector = args.sector
+def raw_write_sectors(jlink, sector: int, data: bytes) -> None:
+    """Writes `data` (must already be a multiple of SECTOR_SIZE) starting at
+    `sector`, chunked under the wire protocol's per-request cap."""
+    total_sectors = len(data) // proto.SECTOR_SIZE
     off = 0
     remaining = total_sectors
     while remaining > 0:
@@ -124,13 +119,77 @@ def cmd_write(jlink, args):
         payload = data[off:off + chunk * proto.SECTOR_SIZE]
         status, _ = transact(jlink, proto.OP_WRITE, sector, chunk, payload=payload)
         if status != proto.STATUS_OK:
-            print(f"WRITE failed at sector {sector}: {proto.status_name(status)}",
-                  file=sys.stderr)
-            return 1
+            raise RuntimeError(f"WRITE failed at sector {sector}: {proto.status_name(status)}")
         sector += chunk
         off += chunk * proto.SECTOR_SIZE
         remaining -= chunk
-    print(f"Wrote {total_sectors} sectors starting at {args.sector} <- {args.input}")
+
+
+def cmd_write(jlink, args):
+    """Writes a file starting at `sector`, prefixed with a length header so
+    `read` can later recover exactly how many bytes/sectors to fetch without
+    being told."""
+    with open(args.input, "rb") as f:
+        file_data = f.read()
+
+    blob = proto.build_header(len(file_data)) + file_data
+    total_sectors = (len(blob) + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
+    blob = blob.ljust(total_sectors * proto.SECTOR_SIZE, b"\x00")
+
+    try:
+        raw_write_sectors(jlink, args.sector, blob)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    print(f"Wrote {len(file_data)} bytes ({total_sectors} sectors) "
+          f"starting at sector {args.sector} <- {args.input}")
+    return 0
+
+
+def cmd_read(jlink, args):
+    """Reads back a file previously written with `write`. Discovers the
+    length from the header `write` embedded, so no count is needed."""
+    try:
+        header_sector = raw_read_sectors(jlink, args.sector, 1)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    ok, length = proto.parse_header(header_sector)
+    if not ok:
+        print(f"No valid header at sector {args.sector} -- was this written with "
+              f"`sdrtt.py write`? For sectors written another way, use `raw-read`.",
+              file=sys.stderr)
+        return 1
+
+    total_sectors = (proto.HEADER_LEN + length + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
+    try:
+        blob = raw_read_sectors(jlink, args.sector, total_sectors)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+
+    file_data = blob[proto.HEADER_LEN:proto.HEADER_LEN + length]
+    with open(args.output, "wb") as f:
+        f.write(file_data)
+
+    print(f"Read {length} bytes ({total_sectors} sectors) "
+          f"from sector {args.sector} -> {args.output}")
+    return 0
+
+
+def cmd_raw_read(jlink, args):
+    """Explicit-count raw sector read, no header involved -- for data not
+    written by `sdrtt.py write` (e.g. inspecting arbitrary card contents)."""
+    try:
+        data = raw_read_sectors(jlink, args.sector, args.count)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    with open(args.output, "wb") as f:
+        f.write(data)
+    print(f"Read {args.count} raw sectors starting at {args.sector} -> {args.output}")
     return 0
 
 
@@ -140,13 +199,32 @@ def cmd_dump(jlink, args):
         print(f"INFO failed: {proto.status_name(status)}", file=sys.stderr)
         return 1
     sector_count = int.from_bytes(payload[0:4], "little")
-    args.sector, args.count, args.output = 0, sector_count, args.output
-    return cmd_read(jlink, args)
+    try:
+        data = raw_read_sectors(jlink, 0, sector_count)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    with open(args.output, "wb") as f:
+        f.write(data)
+    print(f"Dumped {sector_count} sectors -> {args.output}")
+    return 0
 
 
 def cmd_restore(jlink, args):
-    args.sector = 0
-    return cmd_write(jlink, args)
+    with open(args.input, "rb") as f:
+        data = f.read()
+    if len(data) % proto.SECTOR_SIZE != 0:
+        print(f"Image size {len(data)} is not a multiple of {proto.SECTOR_SIZE} "
+              f"bytes -- refusing to guess padding for a whole-card restore.",
+              file=sys.stderr)
+        return 1
+    try:
+        raw_write_sectors(jlink, 0, data)
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
+        return 1
+    print(f"Restored {len(data) // proto.SECTOR_SIZE} sectors <- {args.input}")
+    return 0
 
 
 def build_parser():
@@ -157,14 +235,21 @@ def build_parser():
 
     sub.add_parser("info", help="print sector size and sector count")
 
-    p_read = sub.add_parser("read", help="read sectors to a file")
+    p_read = sub.add_parser(
+        "read", help="read back a file previously written with `write` (size is auto-detected)")
     p_read.add_argument("sector", type=int)
-    p_read.add_argument("count", type=int)
     p_read.add_argument("-o", "--output", required=True)
 
-    p_write = sub.add_parser("write", help="write a file to sectors")
+    p_write = sub.add_parser(
+        "write", help="write a file starting at sector (embeds a length header for `read`)")
     p_write.add_argument("sector", type=int)
     p_write.add_argument("-i", "--input", required=True)
+
+    p_raw_read = sub.add_parser(
+        "raw-read", help="read an explicit sector count, no header (for data not written by `write`)")
+    p_raw_read.add_argument("sector", type=int)
+    p_raw_read.add_argument("count", type=int)
+    p_raw_read.add_argument("-o", "--output", required=True)
 
     p_dump = sub.add_parser("dump", help="read the whole card to a file")
     p_dump.add_argument("-o", "--output", required=True)
@@ -185,6 +270,8 @@ def main():
             return cmd_read(jlink, args)
         if args.cmd == "write":
             return cmd_write(jlink, args)
+        if args.cmd == "raw-read":
+            return cmd_raw_read(jlink, args)
         if args.cmd == "dump":
             return cmd_dump(jlink, args)
         if args.cmd == "restore":

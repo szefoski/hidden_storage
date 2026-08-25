@@ -58,7 +58,20 @@ expansion connector (spi22) to the SD breakout module before flashing.
 pip install -r host/requirements.txt
 python3 host/test_protocol.py     # hardware-free protocol round-trip tests
 python3 host/sdrtt.py info        # requires flashed board connected via J-Link
+python3 host/sdrtt.py write 1000 -i secret.bin    # write, starting at sector 1000
+python3 host/sdrtt.py read  1000 -o out.bin       # read it back -- size is auto-detected
+python3 host/sdrtt.py dump  -o full_card.img      # whole-card raw image
+python3 host/sdrtt.py restore -i full_card.img    # write a whole-card image back
 ```
+
+`write` prepends a 12-byte header (`HSD1` magic + 8-byte length) before the
+file's bytes, so `read` can recover exactly how many bytes/sectors to fetch
+without being told a count. This lives only in `host/protocol.py`
+(`build_header`/`parse_header`) — the firmware and the RTT wire protocol
+don't know about it, they just move raw sectors. `dump`/`restore` bypass this
+entirely for byte-exact whole-card images. For sectors written some other
+way, `raw-read <sector> <count> -o file` does an explicit-count read with no
+header involved.
 
 Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
 on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override

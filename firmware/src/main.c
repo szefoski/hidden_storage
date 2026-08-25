@@ -99,15 +99,18 @@ int main(void)
 				send_response(opcode, RTT_PROTO_STATUS_BAD_FRAME, NULL, 0);
 				break;
 			}
+			/* The host always knows `count` (it's the caller's own request),
+			 * so it expects a count*SD_SECTOR_SIZE payload back regardless of
+			 * status -- zero-fill on error rather than omitting the payload,
+			 * so the response length never depends on success/failure. */
 			static uint8_t data[SD_BLOCK_MAX_XFER_SECTORS * SD_SECTOR_SIZE];
 			uint8_t status = RTT_PROTO_STATUS_OK;
 
 			if (rc != 0 || sd_block_read(sector, count, data) != 0) {
 				status = RTT_PROTO_STATUS_ERROR;
-				send_response(opcode, status, NULL, 0);
-			} else {
-				send_response(opcode, status, data, (size_t)count * SD_SECTOR_SIZE);
+				memset(data, 0, (size_t)count * SD_SECTOR_SIZE);
 			}
+			send_response(opcode, status, data, (size_t)count * SD_SECTOR_SIZE);
 			break;
 		}
 		case RTT_PROTO_OP_WRITE: {
