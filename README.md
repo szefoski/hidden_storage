@@ -13,7 +13,9 @@ nrfutil install sdk-manager
 nrfutil sdk-manager install v3.4.0   # NCS v3.4.0 (Zephyr 4.4), installs to ~/ncs/v3.4.0
 ```
 
-J-Link tools (`JLinkExe`, RTT support) must already be installed separately (SEGGER's J-Link Software Pack) — used here for both flashing and the RTT command link.
+J-Link tools (`JLinkExe`, RTT support) must already be installed separately —
+[SEGGER's J-Link Software Pack](https://www.segger.com/downloads/jlink/) —
+used here for both flashing and the RTT command link.
 
 ## Building the firmware
 
@@ -39,6 +41,17 @@ fixed in `firmware/prj.conf`:
   then default to `y` on their own once the devicetree overlay's
   `zephyr,sdmmc-disk` / `zephyr,sdhc-spi-slot` nodes are present.
 
+## Before flashing: fix the wiring placeholders
+
+`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` has placeholder SPI pins
+and CS GPIO — **update these to match your actual wiring** from the DK's
+expansion connector (spi22) to the SD breakout module, then rebuild (previous
+step), before flashing.
+
+(If you're just testing the RTT link/board with no SD card wired up yet,
+skip this — the placeholders build and flash fine, `disk_access_init()` just
+reports a clean error at runtime, which is expected and already validated.)
+
 ## Flashing
 
 ```sh
@@ -46,23 +59,29 @@ nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -
   west flash -d firmware/build
 ```
 
-## Before flashing: fix the wiring placeholders
-
-`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` has placeholder SPI pins
-and CS GPIO — **update these to match your actual wiring** from the DK's
-expansion connector (spi22) to the SD breakout module before flashing.
-
 ## Host tool
 
+Install into a venv (works everywhere; also the only option on Debian/Ubuntu,
+where `pip install` into system Python is blocked by PEP 668):
+
 ```sh
-pip install -r host/requirements.txt
-python3 host/test_protocol.py     # hardware-free protocol round-trip tests
-python3 host/test_sdrtt.py        # hardware-free command-logic tests, via a firmware simulator
-python3 host/sdrtt.py info        # requires flashed board connected via J-Link
-python3 host/sdrtt.py write 1000 -i secret.bin    # write, starting at sector 1000
-python3 host/sdrtt.py read  1000 -o out.bin       # read it back -- size is auto-detected
-python3 host/sdrtt.py dump  -o full_card.img      # whole-card raw image
-python3 host/sdrtt.py restore -i full_card.img    # write a whole-card image back
+python3 -m venv host/.venv
+host/.venv/bin/pip install -r host/requirements.txt
+```
+
+Everything below except `test_protocol.py` needs `pylink` (i.e. the venv) --
+`test_protocol.py` alone has no hardware/pylink dependency and also runs fine
+with a plain system `python3`.
+
+```sh
+python3 host/test_protocol.py             # hardware-free protocol round-trip tests
+host/.venv/bin/python host/test_sdrtt.py  # hardware-free command-logic tests, via a firmware simulator
+
+host/.venv/bin/python host/sdrtt.py info                        # requires flashed board connected via J-Link
+host/.venv/bin/python host/sdrtt.py write 1000 -i secret.bin    # write, starting at sector 1000
+host/.venv/bin/python host/sdrtt.py read  1000 -o out.bin       # read it back -- size is auto-detected
+host/.venv/bin/python host/sdrtt.py dump  -o full_card.img      # whole-card raw image
+host/.venv/bin/python host/sdrtt.py restore -i full_card.img    # write a whole-card image back
 ```
 
 `write` prepends a 12-byte header (`HSD1` magic + 8-byte length) before the
@@ -76,7 +95,4 @@ header involved.
 
 Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
 on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
-it: `python3 host/sdrtt.py --device <name> info`.
-
-On Debian/Ubuntu, `pip install` into system Python is blocked (PEP 668) — use
-a venv: `python3 -m venv host/.venv && host/.venv/bin/pip install -r host/requirements.txt`.
+it: `host/.venv/bin/python host/sdrtt.py --device <name> info`.
