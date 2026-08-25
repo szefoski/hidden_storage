@@ -1,0 +1,59 @@
+/*
+ * SD card wired over SPI to the DK's expansion connector (spi22, labeled
+ * "nordic_expansion_spi" in the board's common devicetree include).
+ *
+ * spi22's default pinctrl overlaps with UART30 on this board -- disabling
+ * UART30 here frees those pins for SPI use.
+ *
+ * PIN NUMBERS BELOW ARE PLACEHOLDERS. Update pinctrl-0 below (in the pinctrl
+ * node) and the cs-gpios line to match your actual wiring from the DK
+ * expansion header to the SD breakout module's SCK/MOSI/MISO/CS pins before
+ * building.
+ */
+
+&uart30 {
+	status = "disabled";
+};
+
+&pinctrl {
+	spi22_default: spi22_default {
+		group1 {
+			/* NRF_PSEL(FUNC, PORT, PIN) -- replace PORT/PIN to match wiring */
+			psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 9)>,
+				<NRF_PSEL(SPIM_MISO, 1, 10)>;
+		};
+	};
+
+	spi22_sleep: spi22_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 9)>,
+				<NRF_PSEL(SPIM_MISO, 1, 10)>;
+			low-power-enable;
+		};
+	};
+};
+
+&spi22 {
+	status = "okay";
+	pinctrl-0 = <&spi22_default>;
+	pinctrl-1 = <&spi22_sleep>;
+	pinctrl-names = "default", "sleep";
+
+	/* Replace with the actual CS GPIO used on your wiring. */
+	cs-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
+
+	sdhc0: sdhc@0 {
+		compatible = "zephyr,sdhc-spi-slot";
+		reg = <0>;
+		status = "okay";
+		spi-max-frequency = <24000000>;
+
+		mmc {
+			compatible = "zephyr,sdmmc-disk";
+			disk-name = "SD";
+			status = "okay";
+		};
+	};
+};
