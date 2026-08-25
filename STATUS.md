@@ -102,3 +102,21 @@ host tool usage are all there and confirmed working through the build step.
 6. Re-check `lsusb` with the card wired up and RTT traffic flowing, to
    confirm nothing new appears now that real SPI/SD activity is happening
    (expected: still just the J-Link probe, per the reasoning above).
+
+## Planned next improvement: encrypt data at rest (not started)
+
+Once raw read/write against a real card is confirmed working end-to-end (the
+steps above), the next improvement is encrypting data at rest using the
+nRF54L15's on-chip security hardware — **CRACEN** (hardware AES/SHA/ECC/TRNG,
+exposed via Zephyr's PSA Crypto API) and **KMU** (hardware key storage that
+can hold an AES key CRACEN can use for encrypt/decrypt without firmware ever
+being able to read the key back out).
+
+Full design — cipher choice (AES-256-CTR, per-sector deterministic IV), key
+provisioning (generated on-device from CRACEN's TRNG into a KMU protected
+slot, no export path — key loss means data loss, by design), the exact PSA
+API calls involved, and a step-by-step implementation/verification plan — is
+written up in [ENCRYPTION_PLAN.md](ENCRYPTION_PLAN.md). Deliberately not
+started yet: layering hardware-backed crypto onto a data path that hasn't
+seen a real SD card would make it hard to tell which layer broke if
+something failed. Pick this up after the raw-storage path above is solid.
