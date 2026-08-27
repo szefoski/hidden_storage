@@ -72,6 +72,31 @@ repeatedly rather than producing noise.
 
 So the bad data was perfectly **reproducible**, which read as "trustworthy."
 
+### The two registers failed in two different ways
+
+Worth dwelling on, because it explains why the false readings were so
+convincing — and because the failures were not the same kind:
+
+| Register | Value at 1.8 V | Internal CRC7 | What it actually was |
+|---|---|---|---|
+| Identity (CID) | mfr `0x89`, name `"NCard"` | **valid** | a coherent **fallback identity** |
+| Capacity (CSD) | ~2 GB | **invalid** | genuinely **corrupted bits** |
+
+The identity register's checksum being *valid* means those bytes were a
+complete, intact register — just not this card's. `0x89` / `"NCard"` turns out
+to be a documented signature: it is not a registered manufacturer ID (tools
+list it as "Unknown"), and it is reported in card surveys and initialisation
+logs specifically in cases of card failure or corruption. It is what a card
+presents when it cannot deliver its real identity — precisely what an
+undervolted controller unable to read its own configuration flash would do.
+
+The capacity register, by contrast, failed its own checksum. That was not a
+substituted default; it was misread bits that happened to decode into a
+plausible number.
+
+Two different failure modes, in two registers, from one cause. Investigating
+either in isolation led away from the real answer.
+
 ---
 
 ## Root cause 2: pins shared with the debugger
