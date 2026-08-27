@@ -48,11 +48,39 @@ def connect(device: str) -> pylink.JLink:
             num_up = jlink.rtt_get_num_up_buffers()
             num_down = jlink.rtt_get_num_down_buffers()
             if num_up > RTT_CHANNEL and num_down > RTT_CHANNEL:
+                drain_channel(jlink)
                 return jlink
         except pylink.errors.JLinkRTTException:
             pass
         time.sleep(0.1)
     raise RuntimeError("Timed out waiting for RTT channel %d" % RTT_CHANNEL)
+
+
+def drain_channel(jlink: pylink.JLink, quiet: float = 0.15, limit: float = 2.0) -> int:
+    """Discard anything already sitting in the firmware's RTT up-buffer.
+
+    Each sdrtt.py run is a separate process, but the firmware's up-buffer
+    persists across them. Without this, bytes left over from an earlier run
+    (or a response written after that run exited) are read as the beginning
+    of this run's response, so every reply is one command stale -- and since
+    transact() only checks the opcode, a stale READ response validates fine
+    and silently returns another sector's data. Drain until the channel has
+    stayed quiet for `quiet` seconds.
+    """
+    discarded = 0
+    deadline = time.time() + limit
+    last_data = time.time()
+    while time.time() < deadline and (time.time() - last_data) < quiet:
+        try:
+            chunk = jlink.rtt_read(RTT_CHANNEL, 4096)
+        except pylink.errors.JLinkRTTException:
+            break
+        if chunk:
+            discarded += len(chunk)
+            last_data = time.time()
+        else:
+            time.sleep(0.01)
+    return discarded
 
 
 def rtt_write_all(jlink: pylink.JLink, data: bytes) -> None:

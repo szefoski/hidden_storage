@@ -1,6 +1,59 @@
 # Status
 
-## Current state (2026-08-27)
+## Current state (2026-08-27, later session)
+
+**Still debugging `disk_access_init()` reliability on spi22/P1 wiring.**
+Major findings from an extensive on-hardware debugging session, in order:
+
+1. **Nordic Errata No. 100** ("GPIO: Pins with analog functionality might be
+   shorted together during power-on reset") names P1.06/P1.07/P1.10/P1.11 --
+   our exact SCK/MOSI/MISO/CS pins -- as prone to being shorted together or
+   to ground around reset. This is a real, Nordic-documented silicon issue,
+   not a wiring mistake.
+2. Tried moving to P0.00-P0.03 (not covered by the errata, freed by
+   disabling `&uart30`) using spi22 with a custom pinctrl override. This
+   **compiled fine but never worked electrically** -- confirmed via Nordic's
+   own "Essential pin planning guidelines for the nRF54L Series" blog post:
+   the nRF54L15 has hard power-domain routing restrictions. spi22 belongs to
+   the "PERI" domain, hard-wired to P1 only; P0 belongs to the separate "LP"
+   domain. The devicetree/pinctrl tooling doesn't validate this at build
+   time, so the mistake only showed up as 100% deterministic hardware
+   failure.
+3. Switched to **spi30** (the LP-domain peripheral, confirmed to share its
+   register address with `uart30` -- same physical hardware block, two
+   modes). Found via Nordic's own test overlay
+   (`nrf/tests/drivers/spi/spim_instances/`) that only specific pins within
+   P0 carry spi30's signals (SCK=P0.00, MISO=P0.03, MOSI=P0.04 -- not
+   P0.01/P0.02 as first guessed). Got this wired and building correctly, but
+   on real hardware it was **also 100% deterministic failure** -- a raw
+   hex-dump probe (bypassing the SD stack entirely) showed the MISO receive
+   buffer reading all-`0x00` or all-`0xFF` depending on the reset, never
+   real varying data, identically whether the SD card was physically
+   inserted or removed. Points to a receive-path issue on this specific
+   peripheral/pin combination not diagnosable further without an
+   oscilloscope.
+4. **Reverted to spi22/P1** (the errata-affected but at-least-sometimes-
+   working pins) given spi30/P0 was consistently broken rather than
+   intermittently broken.
+5. **Critical methodology finding**: testing via `jlink.reset()` (a
+   debugger-triggered soft reset) vs. a genuine USB power cycle are **not
+   equivalent** on this pin set. Nordic's own workaround for Errata No. 100
+   is literally "do not assert nRESET during power-on reset" -- and in
+   practice, 28 consecutive `jlink.reset()` attempts on spi22/P1 produced
+   **zero** instances of valid CMD8/SDHC detection, while genuine power
+   cycles (USB unplug/replug) produced real `Found SDHC with CMD8 support`
+   log lines on 2 out of 7 attempts -- something never once seen across all
+   the soft-reset testing. Soft resets are not a valid stand-in for testing
+   this specific erratum's behavior.
+6. Even with proper power-cycle testing, full `disk_access_init()` success
+   is still not reliable (0/7 fully clean inits so far, though 2/7 got
+   genuinely further than any soft-reset attempt before still ultimately
+   failing later in the ACMD41 negotiation or a subsequent step). Actively
+   continuing to debug this -- next step is capturing a *complete* log of a
+   power-cycle attempt that starts well, to see exactly where it still
+   breaks down.
+
+## Earlier state (2026-08-27, first session)
 
 **SD card is wired up (CLK/CMD/D0/D3 -> P1.11/P1.06/P1.07/P1.10, 3.3V/GND
 from the DK) but `disk_access_init()` is not yet succeeding reliably.**
@@ -17,21 +70,38 @@ captured over RTT channel 0:
   a firmware logic bug (the logic clearly works correctly when it gets a
   clean response, e.g. attempt 1 above progressed normally into ACMD41).
 - Also lowered `spi-max-frequency` from 24MHz to 4MHz in the overlay
-  (`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay`) as a first
-  mitigation -- didn't fully resolve it alone, but is still the right
-  conservative choice for breadboard/jumper wiring; raise it again later
-  once the connection is solid.
-- **Leading hypothesis**: no pull-up resistor on MISO (the breakout's `D0`
-  line). Confirmed with the user: power is correctly shared from the DK's
-  own 3.3V rail (rules out a ground-reference mismatch), but the breakout
-  is bare pins only with no visible passive components -- consistent with a
-  "native SD bus" style module (matches its D0/D1/D2/D3/CMD/CD pin naming)
-  that doesn't include the pull-ups SPI mode benefits from. A floating
-  MISO before the card actively drives the bus would explain exactly this
-  symptom: different malformed-response error codes across otherwise
-  identical resets. Next test: add an external ~10kOhm pull-up between
-  the breakout's `D0` and `3,3V` pins. Also worth a physical check that the
-  microSD card is fully seated in the socket.
+  (`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay`). Turned out to be
+  moot for the actual failure: Zephyr's SD stack always negotiates its own
+  fixed 400kHz clock for the CMD0-ACMD41 identification phase regardless of
+  `spi-max-frequency` (confirmed in `zephyr/subsys/sd/sd.c`,
+  `SDMMC_CLOCK_400KHZ`) -- that setting only affects post-init data-transfer
+  speed. Still a reasonable conservative choice for breadboard wiring;
+  raise it again once the connection is solid and reliable.
+- **Pull-up-resistor hypothesis (ruled out).** Identified the exact board in
+  use -- Waveshare 3947 (Micro SD Storage Board) -- and pulled its actual
+  schematic
+  ([PDF](https://files.waveshare.com/upload/8/83/Micro-SD-Storage-Board-Schematic.pdf)).
+  It already has onboard 10K pull-ups (R1-R7) to 3.3V on every relevant
+  line (`D0`/`D1`/`D2`/`D3`/`CMD`/`CLK`, plus the separate `CD` pin) --
+  missing pull-ups was not the problem. (Earlier guess was wrong: "bare
+  pins, no visible components" was an inaccurate visual read of the board;
+  the passives are there, just small SMD parts.)
+- **Retry-the-whole-init experiment.** Added a 5-attempt retry loop around
+  `sd_block_init()` in `firmware/src/main.c` (200ms between attempts),
+  reasoning that since some individual resets got further than others
+  (see above), retrying might succeed where a single attempt didn't. It
+  didn't help -- 0/6 resets succeeded even with 5 retries each within the
+  same boot, and more tellingly, **`CMD0` itself** (the simplest possible
+  SD command, needs only CLK toggling + CS asserted) started failing more
+  often than before, not less. That regression points away from
+  firmware/timing entirely and back to a physical connection problem --
+  something more fundamental than protocol-level flakiness.
+- **Current focus: re-verify the physical wiring itself.** Double-checking
+  wire-by-wire that CLK/CMD/D0/D3/3.3V/GND actually land on the intended
+  physical DK header pins (easy to miscount positions on a 2xN header),
+  and that every connection is firm (breadboard/jumper connections are a
+  common source of exactly this kind of intermittent behavior). README now
+  documents the exact Waveshare 3947 pin-to-DK-pin mapping being used.
 
 ## Previous state (2026-08-25)
 
@@ -216,3 +286,72 @@ store with no live git process on the other end, so push would be a
 whole-bundle replace either way; the extra protocol work would only buy UX
 polish (`git push card` instead of `git_hidden.py push <sector>`), not real
 incremental transfer.
+
+## RESOLVED (2026-08-27, evening) -- SD card works end to end
+
+`sdrtt.py info` reports the card correctly and a write/read round-trip is
+byte-for-byte identical, verified against a **stock, unpatched** NCS v3.4.0.
+No Zephyr SDK modifications are required.
+
+    sector_size=512 sector_count=61765632 capacity=30159.0 MiB
+
+Cross-checked against ground truth read from the same card in a laptop: CID
+manufacturer 0x1d (ADATA), OEM "AD", 61765632 sectors. The DK reads exactly
+the same values, and sector 0 decodes as a valid FAT32 MBR (type 0x0c, start
+2048, 61763584 sectors, which sums exactly to the card's capacity).
+
+### Two root causes, both real
+
+**1. Supply voltage was 1.8 V (the decisive one).** The nRF54L15 DK ships with
+its buck regulator at 1.8 V; the SD spec requires 2.7-3.6 V. Found by Daniel
+measuring VDD_IO to GND with a multimeter. Fixed via nRF Connect for Desktop
+-> Board Configurator -> VDD = 3.3 V (persists in the DK).
+
+This single setting explains every earlier symptom, including the ones that
+looked impossible:
+
+- cards that answered short commands but failed all data transfers
+- a CSD that arrived with a valid transport CRC16 but failed its own internal
+  CRC7, decoding to a nonsense 2 GB capacity and the wrong addressing mode
+- one card whose reported identity differed from what a laptop read
+- another card that never left the ACMD41 idle state (R1=0x01) through 1000
+  retries -- it physically could not complete initialisation at 1.8 V
+- **the loopback test passing**, which was the single most misleading piece of
+  evidence: it clocked nRF->nRF at 1.8 V, worked perfectly, and never involved
+  the card at all
+
+**2. The SPI pins collided with the on-board debugger.** Table 9 of the DK
+Hardware User Guide maps the two J-Link virtual COM ports to P0.00-P0.03 and
+P1.04-P1.07, routed through analog switches U4/U5. spi22's stock default pins
+are P1.06/P1.07 -- the UART1 RTS/CTS lines. Moved to SCK=P1.12, MOSI=P1.08,
+MISO=P1.11, CS=P1.14.
+
+### Other fixes made along the way
+
+- `overrun-character` had been set to 0x00 (copied from a Nordic SPI loopback
+  test). SD requires MOSI held high while reading, and Zephyr's `sdhc_spi_rx()`
+  passes a NULL TX buffer, so every read byte is the overrun character. Now
+  left at the nRF default of 0xff.
+- `host/sdrtt.py` never drained the RTT up-buffer on connect, so a response
+  frame left over from a previous invocation was consumed as the current one.
+  Because `transact()` only validated the opcode, a stale READ response
+  verified fine and silently returned another sector's data. Added
+  `drain_channel()`.
+- Added `sd_spi_prime_bus()` in `main.c`: Zephyr's `sdhc_spi_init_card()` sets
+  `SPI_CS_ACTIVE_HIGH` to hold CS inactive for the SD spec's 74 power-up
+  clocks, but that flag is ignored by the generic SPI context and the nRF SPIM
+  driver, so those clocks go out with CS asserted (zephyrproject-rtos/zephyr
+  issue #29946). Kept because it is spec-correct, though it was not the cause.
+
+### Notes for future work
+
+- Only spi20/21/22/30 can drive an SD card. spi00 runs from the 128 MHz PLL
+  with a 4..126 prescaler, giving a floor near 1 MHz; SD identification needs
+  400 kHz, so spi00 fails with -EINVAL. Confirmed by Nordic's own DevZone
+  guidance to use SPIM20/21/22/30 for SD cards.
+- Peripheral-to-port routing is fixed in silicon: spi00->P2, spi20/21/22->P1,
+  spi30->P0. A mismatched pin/peripheral combination compiles without error
+  and cannot work.
+- Zephyr's `sdmmc_spi_read_cxd()` returns 0 even when the underlying request
+  fails, so a failed CID/CSD read is silently treated as success and garbage is
+  decoded as a valid register. Worth being aware of when debugging.

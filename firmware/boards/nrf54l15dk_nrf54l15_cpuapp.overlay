@@ -1,50 +1,128 @@
 /*
- * SD card wired over SPI to the DK's expansion connector, using spi22
- * (labeled "nordic_expansion_spi" and already fully pin-configured in
- * Nordic's own board file, nrf54l_05_10_15_cpuapp_common.dtsi) -- so this
- * overlay does NOT redefine pinctrl or cs-gpios, it only enables the node
- * and adds the SD-over-SPI child nodes on top of Nordic's existing config.
+ * SD card wired over SPI to the DK's P1 connector, using spi22.
  *
- * Per the nRF54L15 DK Hardware User Guide (v0.9.1) pin maps and
- * nrf54l15dk_nrf54l_05_10_15-pinctrl.dtsi, wire the SD breakout module to:
- *   SCK  -> P1.11  (free GPIO on the P1 header, no other function)
- *   MISO -> P1.07  (shared with UART1_RXD -- freed by disabling &uart30
- *                    below, since spi22 and UART30 share these pins)
- *   MOSI -> P1.06  (shared with UART1_RST -- same as above)
- *   CS   -> P1.10  (Nordic's own default cs-gpios for this node -- this
- *                    pin is ALSO wired to LED1. LEDs on this DK are driven
- *                    through a transistor buffer, not directly from the
- *                    GPIO, so this is a harmless cosmetic side effect
- *                    (LED1 will flicker with SPI CS activity), not a
- *                    electrical conflict.)
- *   3V3  -> any VDDIO/VCC pin on P0/P1/P2 (see the DK's silkscreen)
- *   GND  -> any GND pin on P0/P1/P2
+ * ROOT CAUSE OF ALL EARLIER FAILURES (see STATUS.md for the full history):
+ * every pin set previously tried was physically wired to the DK's on-board
+ * debugger. Per the nRF54L15 DK Hardware User Guide (v0.9.1) Table 9, the
+ * two J-Link virtual COM ports occupy these SoC pins:
  *
- * These come directly from Nordic's own default overlay for this exact
- * node (grep ~/ncs/v3.4.0/zephyr/boards/nordic/nrf54l15dk/ for
- * "nordic_expansion_spi") -- not guessed. Double-check against the DK's
- * physical silkscreen labels before wiring, since header pin *positions*
- * on the physical connector are not verified here, only the P1.xx ->
- * function mapping from Nordic's documentation and devicetree source.
+ *     Signal   Serial Port 0    Serial Port 1
+ *     TXD      P0.00            P1.04
+ *     RXD      P0.01            P1.05
+ *     RTS      P0.02            P1.06
+ *     CTS      P0.03            P1.07
+ *
+ * and "the UART signals are routed to the debugger through analog switches
+ * U4 and U5". So the original spi22 attempt used MOSI=P1.06 / MISO=P1.07
+ * (the UART1 RTS/CTS lines), and the later spi30 attempt used SCK=P0.00 /
+ * CS=P0.01 / MISO=P0.03 (three of the four UART0 lines). In both cases the
+ * interface MCU was connected to our SPI signals, which is why an isolated
+ * MOSI-MISO jumper loopback returned corrupted data with no SD card attached
+ * at all. This was NOT Nordic's Errata No. 100 -- that erratum lists
+ * overlapping pins and looked like a match, but the real cause is board-level
+ * routing, and it applies equally to the P0 pins the erratum never mentions.
+ *
+ * WHY NOT spi00/P2: P2 has the most free pins, but spi00 is clocked from the
+ * 128MHz PLL with a prescaler range of only 4..126, giving a minimum SCK of
+ * ~1.016MHz. SD card identification must run at 400kHz, so spi00 physically
+ * cannot drive an SD card -- it fails at init with -EINVAL ("Failed to
+ * configure nrfx driver: -22"). spi20/21/22/30 run from 16MHz with a 2..126
+ * prescaler (min ~127kHz), so they can produce the required 400kHz.
+ *
+ * PIN SELECTION. Peripheral-to-port routing is fixed in silicon (spi00->P2,
+ * spi20/21/22->P1, spi30->P0), so a 400kHz-capable instance means P1 or P0.
+ * From the DK Hardware User Guide pin maps (Tables 3-5):
+ *   - P0 is unusable: P0.00-P0.03 are debugger UART0, P0.04 is Button 3, and
+ *     P0.05/P0.06 are not brought out to the connector at all.
+ *   - P1: P1.00-P1.03 need solder-bridge/0R rework (32.768kHz crystal, NFC),
+ *     P1.04-P1.07 are debugger UART1, leaving P1.08-P1.14. Of those, P1.11
+ *     and P1.12 are completely free, and the rest drive Buttons 2/1/0 and
+ *     LEDs 1/3 -- all of which are electrically harmless to reuse:
+ *     per the User Guide the buttons are a bare switch to GND with NO
+ *     external pull-up and no debounce capacitor, and the LEDs are buffered
+ *     by a MOSFET whose gate has only a 1M resistor to GND.
+ *
+ * Chosen so that the two free, unloaded pins carry the clock and the input,
+ * MOSI sits on the one pin that Errata No. 100 does not list at all (P1.08),
+ * and chip select -- an output, and the least timing-critical signal -- takes
+ * the remaining LED pin. All four signals are on the P1 header.
+ *
+ * Wiring -- ALL FOUR SIGNALS ARE ON THE P1 HEADER:
+ *   SCK  -> P1.12  (free)
+ *   MOSI -> P1.08  (Button 2, disabled below)
+ *   MISO -> P1.11  (free)
+ *   CS   -> P1.14  (LED 3, disabled below -- LED 3 would otherwise track CS)
+ *   3V3  -> any VDDIO/VCC pin (see the DK silkscreen)
+ *   GND  -> any GND pin
+ *
+ * Do not press Button 2 while the SD card is in use: it would short MOSI to
+ * ground.
+ *
+ * For the Waveshare 3947 (Micro SD Storage Board), its native-SD-bus pin
+ * labels map as: CLK->SCK, CMD->MOSI, D0->MISO, D3->CS. D1, D2 and the
+ * separate CD (card-detect switch) pin are unused in SPI mode and must be
+ * left unconnected -- the board already has 10K pull-ups on them. See README.
  */
 
-&uart30 {
+&button2 {
+	/* P1.08 is reused as MOSI below. */
 	status = "disabled";
+};
+
+&led3 {
+	/* P1.14 is reused as the SD card's chip select below. */
+	status = "disabled";
+};
+
+&pinctrl {
+	spi22_sd: spi22_sd {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 8)>;
+		};
+
+		group2 {
+			psels = <NRF_PSEL(SPIM_MISO, 1, 11)>;
+			/* The card drives MISO only while it is selected; hold the
+			 * line high the rest of the time. The Waveshare board also
+			 * has its own 10K pull-up on D0 -- both is fine. */
+			bias-pull-up;
+		};
+	};
+
+	spi22_sd_sleep: spi22_sd_sleep {
+		group1 {
+			psels = <NRF_PSEL(SPIM_SCK, 1, 12)>,
+				<NRF_PSEL(SPIM_MISO, 1, 11)>,
+				<NRF_PSEL(SPIM_MOSI, 1, 8)>;
+			low-power-enable;
+		};
+	};
 };
 
 &spi22 {
 	status = "okay";
+	pinctrl-0 = <&spi22_sd>;
+	pinctrl-1 = <&spi22_sd_sleep>;
+	pinctrl-names = "default", "sleep";
+	cs-gpios = <&gpio1 14 GPIO_ACTIVE_LOW>;
+
+	/* NOTE: overrun-character is deliberately NOT set here -- it must stay
+	 * at the nRF default of 0xff. Zephyr's sdhc_spi_rx() passes a NULL TX
+	 * buffer when reading, so every byte clocked out during a read is the
+	 * overrun character, and the SD SPI protocol requires the host to hold
+	 * MOSI high (0xff) while receiving. An earlier revision of this file
+	 * copied "overrun-character = <0x00>" from Nordic's SPI loopback test
+	 * overlay, which is correct for that test but breaks SD entirely. */
 
 	sdhc0: sdhc@0 {
 		compatible = "zephyr,sdhc-spi-slot";
 		reg = <0>;
 		status = "okay";
-		/* Lowered from 24MHz: "Bad data CRC" / disk_access_init -134 at
-		 * 24MHz on breadboard/jumper-wire wiring -- classic signal
-		 * integrity issue at that speed over loose wiring, not a
-		 * protocol bug (identification already succeeds fine before
-		 * this). Raise again once wiring is more robust (soldered,
-		 * shorter leads) if higher throughput is needed. */
+		/* Card identification always runs at 400kHz regardless of this
+		 * value; it only caps the post-init clock. 4MHz is conservative
+		 * for jumper-wire wiring (spi22's ceiling is 8MHz) -- raise once
+		 * the link is proven and the wiring is short/soldered. */
 		spi-max-frequency = <4000000>;
 
 		mmc {

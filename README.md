@@ -47,28 +47,75 @@ fixed in `firmware/prj.conf`:
 
 ## Wiring the SD card
 
-`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` uses `&spi22`
-("nordic_expansion_spi" in Nordic's own board file) with its **stock default
-pin assignment** -- no pins invented or guessed here; verified directly
-against `nrf54l15dk_nrf54l_05_10_15-pinctrl.dtsi` and
-`nrf54l_05_10_15_cpuapp_common.dtsi` in the installed NCS source, and
-cross-checked against the nRF54L15 DK Hardware User Guide's pin maps.
-(An earlier version of this overlay had placeholder pins that turned out to
-collide with onboard buttons/LEDs -- fixed by just using Nordic's own
-already-correct default instead of inventing one.)
+### FIRST: set the DK's supply voltage to 3.3 V
 
-| Signal | DK pin | Note |
+**The nRF54L15 DK ships configured for 1.8 V, and an SD card cannot work at
+1.8 V.** The SD specification requires 2.7-3.6 V. At 1.8 V a card will
+partially respond -- enough that initialisation looks like it is almost
+working -- while returning corrupt registers, nonsensical capacities, and
+failing every data transfer. This costs a great deal of debugging time if you
+do not know to check it, because nothing in the software reports "voltage".
+
+Per the nRF54L15 DK Hardware User Guide: *"BUCK supplies nRF54L15 VDDM input
+with a default voltage of 1.8 V... To change the VDDM voltage, use the Board
+Configurator GUI."*
+
+To fix it: open **nRF Connect for Desktop** -> **Board Configurator** ->
+select the DK -> set **VDD to 3.3 V** -> write the configuration -> power
+cycle the board. Verify with a multimeter that VDD_IO to GND reads ~3.3 V
+before going further. This setting persists in the DK, so it only has to be
+done once.
+
+### Pin assignment
+
+`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` uses `&spi22`. Note that
+it does **not** use spi22's stock default pins: those defaults (P1.06/P1.07)
+are the debugger's UART1 RTS/CTS lines, which are wired to the on-board
+interface MCU through analog switch U5 and therefore fight the SPI bus. See
+the overlay's header comment and STATUS.md for the full story.
+
+Peripheral-to-port routing is fixed in silicon (spi00->P2, spi20/21/22->P1,
+spi30->P0), and only spi20/21/22/30 can produce the 400 kHz that SD card
+identification requires -- spi00 runs from the 128 MHz PLL and bottoms out
+near 1 MHz, so it cannot drive an SD card at all.
+
+| SPI signal | DK pin | Note |
 |---|---|---|
-| SCK  | P1.11 | Free GPIO, no other function |
-| MISO | P1.07 | Shared with UART1_RXD -- freed by disabling `&uart30` (this overlay already does that; spi22 and UART30 share these pins) |
-| MOSI | P1.06 | Shared with UART1_RST -- same as above |
-| CS   | P1.10 | Nordic's own default CS pin for this node. Also wired to LED1, but LEDs on this DK are buffered through a transistor, not driven directly -- so this is a harmless cosmetic side effect (LED1 flickers with SPI CS activity), not an electrical conflict |
-| 3V3  | any VDDIO/VCC pin on the P0/P1/P2 header | see the DK's silkscreen |
+| SCK  | P1.12 | Free GPIO, no other function |
+| MOSI | P1.08 | Button 2 -- `&button2` is disabled in the overlay. Bare switch to GND, no pull-up or debounce capacitor, so electrically clean. **Do not press Button 2 while the card is in use**: it shorts MOSI to ground |
+| MISO | P1.11 | Free GPIO, no other function; the overlay adds an internal pull-up |
+| CS   | P1.14 | LED 3 -- `&led3` is disabled in the overlay. The LED is a MOSFET gate with a 1M resistor to GND, a negligible load on an output |
+| 3V3  | any VDD pin on the P0/P1/P2 header | must be 3.3 V -- see above |
 | GND  | any GND pin on the P0/P1/P2 header | see the DK's silkscreen |
 
-Wire your SD breakout module's SCK/MISO/MOSI/CS/3V3/GND to those DK pins,
+Avoid P1.04-P1.07 and P0.00-P0.03 entirely: those are the debugger's two
+virtual COM ports (Table 9 of the DK Hardware User Guide) and are physically
+connected to the interface MCU.
+
+### Wired and tested against: Waveshare 3947 (Micro SD Storage Board)
+
+Its 9-pin header uses native SD-bus pin names, not SPI names -- same
+physical signals, different labels:
+
+| Board pin | SPI signal | DK pin |
+|---|---|---|
+| `CLK` | SCK  | P1.12 |
+| `CMD` | MOSI | P1.08 |
+| `D0`  | MISO | P1.11 |
+| `D3` (labeled `CD/D3`) | CS | P1.14 |
+| `VDD`/`3,3V` | 3V3 | any VDDIO/VCC pin |
+| `VSS`/`GND` | GND | any GND pin |
+| `D1`, `D2`, and the separate `CD` (card-detect switch) pin | -- | leave unconnected, not used in SPI mode |
+
+This board's [official schematic](https://files.waveshare.com/upload/8/83/Micro-SD-Storage-Board-Schematic.pdf)
+confirms it already has onboard 10K pull-up resistors (R1-R6) to 3.3V on
+`D0`/`D1`/`D2`/`D3`/`CMD`/`CLK`, plus one (R7) on the separate `CD` line --
+**no external pull-up resistors needed**, this board already has them.
+
+Wire your breakout module's SCK/MISO/MOSI/CS/3V3/GND to those DK pins,
 then build and flash (previous/next sections) -- no overlay changes needed
-for the default wiring above. If you wire it differently, override
+for the default wiring above. If you wire it differently (a different
+breakout board, or different DK pins), override
 `cs-gpios`/`pinctrl-0`/`pinctrl-1` in the overlay to match.
 
 (If you're just testing the RTT link/board with no SD card wired up yet,
