@@ -45,16 +45,36 @@ fixed in `firmware/prj.conf`:
   then default to `y` on their own once the devicetree overlay's
   `zephyr,sdmmc-disk` / `zephyr,sdhc-spi-slot` nodes are present.
 
-## Before flashing: fix the wiring placeholders
+## Wiring the SD card
 
-`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` has placeholder SPI pins
-and CS GPIO — **update these to match your actual wiring** from the DK's
-expansion connector (spi22) to the SD breakout module, then rebuild (previous
-step), before flashing.
+`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` uses `&spi22`
+("nordic_expansion_spi" in Nordic's own board file) with its **stock default
+pin assignment** -- no pins invented or guessed here; verified directly
+against `nrf54l15dk_nrf54l_05_10_15-pinctrl.dtsi` and
+`nrf54l_05_10_15_cpuapp_common.dtsi` in the installed NCS source, and
+cross-checked against the nRF54L15 DK Hardware User Guide's pin maps.
+(An earlier version of this overlay had placeholder pins that turned out to
+collide with onboard buttons/LEDs -- fixed by just using Nordic's own
+already-correct default instead of inventing one.)
+
+| Signal | DK pin | Note |
+|---|---|---|
+| SCK  | P1.11 | Free GPIO, no other function |
+| MISO | P1.07 | Shared with UART1_RXD -- freed by disabling `&uart30` (this overlay already does that; spi22 and UART30 share these pins) |
+| MOSI | P1.06 | Shared with UART1_RST -- same as above |
+| CS   | P1.10 | Nordic's own default CS pin for this node. Also wired to LED1, but LEDs on this DK are buffered through a transistor, not driven directly -- so this is a harmless cosmetic side effect (LED1 flickers with SPI CS activity), not an electrical conflict |
+| 3V3  | any VDDIO/VCC pin on the P0/P1/P2 header | see the DK's silkscreen |
+| GND  | any GND pin on the P0/P1/P2 header | see the DK's silkscreen |
+
+Wire your SD breakout module's SCK/MISO/MOSI/CS/3V3/GND to those DK pins,
+then build and flash (previous/next sections) -- no overlay changes needed
+for the default wiring above. If you wire it differently, override
+`cs-gpios`/`pinctrl-0`/`pinctrl-1` in the overlay to match.
 
 (If you're just testing the RTT link/board with no SD card wired up yet,
-skip this — the placeholders build and flash fine, `disk_access_init()` just
-reports a clean error at runtime, which is expected and already validated.)
+none of this matters yet -- the overlay builds and flashes fine either way,
+`disk_access_init()` just reports a clean error at runtime, which is
+expected and already validated.)
 
 ## Flashing
 

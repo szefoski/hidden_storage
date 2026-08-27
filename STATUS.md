@@ -126,23 +126,27 @@ numbers rather than silently rounded. 29 tests passing (up from 19).
 See [README.md](README.md) — toolchain setup, build command, flashing, and
 host tool usage are all there and confirmed working through the build step.
 
-## Next steps (once the SD card reader arrives)
+## Next steps (SD card reader is in hand now)
 
-1. Wire the SD breakout module to the DK's expansion connector (spi22:
-   SCK/MOSI/MISO/CS).
-2. Update the placeholder pin numbers and `cs-gpios` in
-   `firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` to match the actual
-   wiring.
-3. Re-flash (same command as before, already confirmed working):
-   `nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- west flash -d firmware/build`
-4. Run `python3 host/sdrtt.py info` — RTT link is already proven working; this
-   run is specifically to test SD-over-SPI init. If `disk_access_init()`
-   fails (see CMD8/CMD58 note above), check wiring/pull-ups before touching
-   firmware logic.
-5. Once `info` reports sane sector size/count, test `read`/`write`/`dump`
+1. **Wiring overlay corrected (2026-08-27)**: the overlay previously had
+   placeholder SPI pins that turned out to collide with onboard buttons/LEDs
+   (P1.08/P1.09/P1.10 = Button2/Button1/LED1). Replaced with Nordic's own
+   verified default pin assignment for this exact node (`nordic_expansion_spi`
+   in `nrf54l_05_10_15_cpuapp_common.dtsi`) instead of guessing -- see the
+   wiring table in [README.md](README.md#wiring-the-sd-card). Rebuilt and
+   reflashed with the corrected overlay; RTT link still confirmed working
+   (`sdrtt.py info` still cleanly reports `ERROR` with no card wired up,
+   same as before -- no regression).
+2. Wire the SD breakout module's SCK/MISO/MOSI/CS/3V3/GND to
+   P1.11/P1.07/P1.06/P1.10/VDDIO/GND per that table.
+3. Run `host/.venv/bin/python host/sdrtt.py info` — RTT link is already
+   proven working; this run is specifically to test SD-over-SPI init. If
+   `disk_access_init()` fails (see CMD8/CMD58 note above), check
+   wiring/pull-ups before touching firmware logic.
+4. Once `info` reports sane sector size/count, test `read`/`write`/`dump`
    round-trips against a throwaway card (or spare sectors) before trusting it
    with real data.
-6. Re-check `lsusb` with the card wired up and RTT traffic flowing, to
+5. Re-check `lsusb` with the card wired up and RTT traffic flowing, to
    confirm nothing new appears now that real SPI/SD activity is happening
    (expected: still just the J-Link probe, per the reasoning above).
 

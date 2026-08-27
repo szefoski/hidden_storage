@@ -1,48 +1,39 @@
 /*
- * SD card wired over SPI to the DK's expansion connector (spi22, labeled
- * "nordic_expansion_spi" in the board's common devicetree include).
+ * SD card wired over SPI to the DK's expansion connector, using spi22
+ * (labeled "nordic_expansion_spi" and already fully pin-configured in
+ * Nordic's own board file, nrf54l_05_10_15_cpuapp_common.dtsi) -- so this
+ * overlay does NOT redefine pinctrl or cs-gpios, it only enables the node
+ * and adds the SD-over-SPI child nodes on top of Nordic's existing config.
  *
- * spi22's default pinctrl overlaps with UART30 on this board -- disabling
- * UART30 here frees those pins for SPI use.
+ * Per the nRF54L15 DK Hardware User Guide (v0.9.1) pin maps and
+ * nrf54l15dk_nrf54l_05_10_15-pinctrl.dtsi, wire the SD breakout module to:
+ *   SCK  -> P1.11  (free GPIO on the P1 header, no other function)
+ *   MISO -> P1.07  (shared with UART1_RXD -- freed by disabling &uart30
+ *                    below, since spi22 and UART30 share these pins)
+ *   MOSI -> P1.06  (shared with UART1_RST -- same as above)
+ *   CS   -> P1.10  (Nordic's own default cs-gpios for this node -- this
+ *                    pin is ALSO wired to LED1. LEDs on this DK are driven
+ *                    through a transistor buffer, not directly from the
+ *                    GPIO, so this is a harmless cosmetic side effect
+ *                    (LED1 will flicker with SPI CS activity), not a
+ *                    electrical conflict.)
+ *   3V3  -> any VDDIO/VCC pin on P0/P1/P2 (see the DK's silkscreen)
+ *   GND  -> any GND pin on P0/P1/P2
  *
- * PIN NUMBERS BELOW ARE PLACEHOLDERS. Update pinctrl-0 below (in the pinctrl
- * node) and the cs-gpios line to match your actual wiring from the DK
- * expansion header to the SD breakout module's SCK/MOSI/MISO/CS pins before
- * building.
+ * These come directly from Nordic's own default overlay for this exact
+ * node (grep ~/ncs/v3.4.0/zephyr/boards/nordic/nrf54l15dk/ for
+ * "nordic_expansion_spi") -- not guessed. Double-check against the DK's
+ * physical silkscreen labels before wiring, since header pin *positions*
+ * on the physical connector are not verified here, only the P1.xx ->
+ * function mapping from Nordic's documentation and devicetree source.
  */
 
 &uart30 {
 	status = "disabled";
 };
 
-&pinctrl {
-	spi22_default: spi22_default {
-		group1 {
-			/* NRF_PSEL(FUNC, PORT, PIN) -- replace PORT/PIN to match wiring */
-			psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 1, 9)>,
-				<NRF_PSEL(SPIM_MISO, 1, 10)>;
-		};
-	};
-
-	spi22_sleep: spi22_sleep {
-		group1 {
-			psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
-				<NRF_PSEL(SPIM_MOSI, 1, 9)>,
-				<NRF_PSEL(SPIM_MISO, 1, 10)>;
-			low-power-enable;
-		};
-	};
-};
-
 &spi22 {
 	status = "okay";
-	pinctrl-0 = <&spi22_default>;
-	pinctrl-1 = <&spi22_sleep>;
-	pinctrl-names = "default", "sleep";
-
-	/* Replace with the actual CS GPIO used on your wiring. */
-	cs-gpios = <&gpio1 11 GPIO_ACTIVE_LOW>;
 
 	sdhc0: sdhc@0 {
 		compatible = "zephyr,sdhc-spi-slot";
