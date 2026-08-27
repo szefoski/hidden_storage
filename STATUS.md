@@ -355,3 +355,28 @@ MISO=P1.11, CS=P1.14.
 - Zephyr's `sdmmc_spi_read_cxd()` returns 0 even when the underlying request
   fails, so a failed CID/CSD read is silently treated as success and garbage is
   decoded as a valid register. Worth being aware of when debugging.
+
+### Correction: the Goodram card was never faulty
+
+Re-tested at 3.3 V, the Goodram card works exactly as well as the ADATA one:
+
+    sector_size=512 sector_count=30617600 capacity=14950.0 MiB
+    Card MID: 0xc9, OID: `M
+    Card block count 30617600, block size 512
+
+and a write/read round-trip is byte-for-byte identical. Those values match what
+Linux reads from the same card (manfid 0x0000c9, oemid 0x4d60, 30617600
+sectors) precisely.
+
+Everything previously attributed to that card was an artefact of running it at
+1.8 V: the "NCard" product string, manufacturer ID 0x89, the 3904512-block
+capacity, and the CSD that failed its own CRC7. Under-volting made the card
+fabricate self-consistent but entirely false register contents, which is why
+the wrong values looked so convincing -- they even decoded into a coherent
+capacity and a matching partition table.
+
+Conclusions drawn during that period -- that the card was counterfeit, or that
+its SPI mode was broken -- were wrong. Both cards are genuine and both work.
+The lesson worth keeping: a reading can be perfectly self-consistent and still
+be entirely wrong if the measurement conditions are out of spec. Confirm supply
+voltage before interpreting any register content.
