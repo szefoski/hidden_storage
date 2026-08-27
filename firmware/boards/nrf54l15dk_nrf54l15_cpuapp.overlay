@@ -39,7 +39,13 @@
 		compatible = "zephyr,sdhc-spi-slot";
 		reg = <0>;
 		status = "okay";
-		spi-max-frequency = <24000000>;
+		/* Lowered from 24MHz: "Bad data CRC" / disk_access_init -134 at
+		 * 24MHz on breadboard/jumper-wire wiring -- classic signal
+		 * integrity issue at that speed over loose wiring, not a
+		 * protocol bug (identification already succeeds fine before
+		 * this). Raise again once wiring is more robust (soldered,
+		 * shorter leads) if higher throughput is needed. */
+		spi-max-frequency = <4000000>;
 
 		mmc {
 			compatible = "zephyr,sdmmc-disk";

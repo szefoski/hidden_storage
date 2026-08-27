@@ -1,6 +1,39 @@
 # Status
 
-## Current state (2026-08-25)
+## Current state (2026-08-27)
+
+**SD card is wired up (CLK/CMD/D0/D3 -> P1.11/P1.06/P1.07/P1.10, 3.3V/GND
+from the DK) but `disk_access_init()` is not yet succeeding reliably.**
+Debugged with `CONFIG_SD_LOG_LEVEL_DBG`/`CONFIG_SDHC_LOG_LEVEL_DBG` (both
+now in `firmware/prj.conf`, commented as temporary) and repeated resets
+captured over RTT channel 0:
+
+- 0/8 reset attempts succeeded in one test run.
+- Failures show **varying underlying error codes across resets** (`-134`
+  EILSEQ, `-5` EIO, `-22` EINVAL) at different stages (sometimes CMD0/CMD8
+  themselves fail, sometimes it gets past both and into the CMD55/CMD41
+  voltage-negotiation retry loop before failing) -- inconsistent failure
+  point across identical resets points to a marginal electrical issue, not
+  a firmware logic bug (the logic clearly works correctly when it gets a
+  clean response, e.g. attempt 1 above progressed normally into ACMD41).
+- Also lowered `spi-max-frequency` from 24MHz to 4MHz in the overlay
+  (`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay`) as a first
+  mitigation -- didn't fully resolve it alone, but is still the right
+  conservative choice for breadboard/jumper wiring; raise it again later
+  once the connection is solid.
+- **Leading hypothesis**: no pull-up resistor on MISO (the breakout's `D0`
+  line). Confirmed with the user: power is correctly shared from the DK's
+  own 3.3V rail (rules out a ground-reference mismatch), but the breakout
+  is bare pins only with no visible passive components -- consistent with a
+  "native SD bus" style module (matches its D0/D1/D2/D3/CMD/CD pin naming)
+  that doesn't include the pull-ups SPI mode benefits from. A floating
+  MISO before the card actively drives the bus would explain exactly this
+  symptom: different malformed-response error codes across otherwise
+  identical resets. Next test: add an external ~10kOhm pull-up between
+  the breakout's `D0` and `3,3V` pins. Also worth a physical check that the
+  microSD card is fully seated in the socket.
+
+## Previous state (2026-08-25)
 
 Firmware **builds, flashes, and runs on the real nRF54L15-DK.** RTT link to
 the host is confirmed working end-to-end: `sdrtt.py info` connects, sends a
