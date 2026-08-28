@@ -456,3 +456,42 @@ mmc/scsi/usb-storage events. The only removable device present is the DK's own
 So the card is fully accessible to the firmware and the RTT host tool while
 being entirely absent from the operating system's storage stack, which is the
 whole purpose of the design.
+
+## Encryption added (2026-08-28) -- firmware-side CRACEN, AES-256-CTR
+
+Optional payload encryption is now implemented and verified on hardware. It
+closes the gap PLAN.md called out: "hidden" previously meant the OS did not
+enumerate the card, but the raw sectors were plaintext.
+
+Design (see the encryption section in README.md for usage):
+- Runs entirely in the firmware on the nRF54L15's CRACEN hardware crypto
+  engine via the PSA Crypto API (`firmware/src/crypto.c`). The host does no
+  crypto; the card holds only ciphertext.
+- Passphrase-based, derived on-device: the host sends the passphrase over the
+  local RTT link, the DK runs PBKDF2-HMAC-SHA256 (20000 iterations, ~2.3s) to
+  derive a 256-bit key, held in a volatile PSA key slot for the session only.
+- AES-256-CTR keyed per absolute sector number (IV = sector in the high 64
+  bits), so ciphertext is exactly 512 bytes/sector and every sector is
+  independently accessible. Confidentiality, not integrity -- matches the
+  passive-read threat.
+- Opt-in and per command: a `RTT_PROTO_FLAG_ENC` (0x40) bit in the opcode byte
+  selects encryption on a READ/WRITE. `write`/`read` set it under `--encrypt`;
+  `raw-read`/`dump`/`restore` never do (so raw reads expose the ciphertext).
+  Without `--encrypt`, behaviour is byte-for-byte unchanged.
+- New opcode `RTT_PROTO_OP_UNLOCK` (0x03) sets the session key.
+
+On-hardware verification (Goodram + ADATA both fine):
+- Encrypted write then read with the correct passphrase: byte-identical.
+- Read with a wrong passphrase: fails cleanly (no valid header), no plaintext.
+- Raw read of the encrypted sectors: no `HSD1` magic, no plaintext, ~7.5
+  bits/byte entropy over 512 bytes -- the card genuinely holds ciphertext.
+- 5 MiB encrypted round-trip: byte-identical, ~92 KB/s -- within noise of the
+  ~93 KB/s plaintext rate, so CRACEN adds no measurable overhead (still
+  SWD-bound).
+
+Cost: flash 55.0 KB -> 68.8 KB (CRACEN/PSA), RAM essentially unchanged
+(145.3 -> 145.9 KB). Builds and runs on a stock, unpatched NCS v3.4.0.
+
+Known limitation: the PBKDF2 salt is a fixed build-time constant
+(`firmware/src/crypto.c`) -- adequate for a single-user store, upgradable to a
+random per-card salt in a reserved sector later without a wire-protocol change.

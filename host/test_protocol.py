@@ -111,6 +111,28 @@ def test_parse_sector_or_offset_rejects_garbage():
         pass
 
 
+def test_enc_flag_is_carried_in_opcode_and_recovered():
+    # A READ with the ENC flag set builds a request whose opcode byte carries
+    # 0x40, and a matching response round-trips through parse_response with the
+    # flag preserved (so transact()'s opcode-echo check passes).
+    opcode = proto.OP_READ | proto.FLAG_ENC
+    req = proto.build_request(opcode, sector=7, count=1, payload=b"")
+    assert req[0] == opcode
+    assert req[0] & proto.OP_MASK == proto.OP_READ
+
+    body = bytes([proto.FLAG_RESP | opcode, proto.STATUS_OK])
+    frame = body + struct.pack("<H", proto.crc16_ccitt(body))
+    resp_opcode, status, _ = proto.parse_response(frame)
+    assert resp_opcode == opcode          # flag preserved
+    assert status == proto.STATUS_OK
+
+
+def test_unlock_opcode_distinct():
+    # OP_UNLOCK must be a distinct base opcode, not colliding with a flag bit.
+    assert proto.OP_UNLOCK & proto.OP_MASK == proto.OP_UNLOCK
+    assert proto.OP_UNLOCK not in (proto.OP_INFO, proto.OP_READ, proto.OP_WRITE)
+
+
 if __name__ == "__main__":
     import sys
 

@@ -11,6 +11,8 @@ mismatch between the two is a real signal, not a tautology. Keep this in
 sync by hand whenever the wire protocol or main.c's dispatch logic changes --
 there is no other link between the two.
 """
+import hashlib
+
 import protocol as proto
 
 RTT_CHANNEL = 1
@@ -22,6 +24,7 @@ class FakeFirmware:
         self.sector_count = sector_count
         self.card_present = card_present
         self.storage = {}  # sector index -> bytes(sector_size)
+        self._key = None   # set by OP_UNLOCK; None == locked
 
         self._down_buf = bytearray()  # bytes written by the host, awaiting a full frame
         self._up_buf = bytearray()  # response bytes queued for the host to read
@@ -47,9 +50,15 @@ class FakeFirmware:
             if len(self._down_buf) < 7:
                 return
             opcode = self._down_buf[0]
+            op = opcode & proto.OP_MASK
             sector = int.from_bytes(self._down_buf[1:5], "little")
             count = int.from_bytes(self._down_buf[5:7], "little")
-            payload_len = count * self.sector_size if opcode == proto.OP_WRITE else 0
+            if op == proto.OP_WRITE:
+                payload_len = count * self.sector_size
+            elif op == proto.OP_UNLOCK:
+                payload_len = count  # count == passphrase length
+            else:
+                payload_len = 0
             total_len = 7 + payload_len + 2
 
             if len(self._down_buf) < total_len:
@@ -65,47 +74,85 @@ class FakeFirmware:
 
             self._handle_request(opcode, sector, count, frame[7:7 + payload_len])
 
+    def _sector_xform(self, sector, buf):
+        """Reversible, sector- and key-dependent transform standing in for the
+        firmware's AES-256-CTR. Not real crypto -- just a deterministic
+        keystream XOR, enough to exercise the host's encrypt/decrypt plumbing:
+        an encrypted write then encrypted read round-trips, a raw read of the
+        same sectors returns transformed ('ciphertext') bytes, and a different
+        passphrase yields a different keystream."""
+        out = bytearray(buf)
+        ks = bytearray()
+        ctr = 0
+        while len(ks) < len(out):
+            ks.extend(hashlib.sha256(
+                self._key + sector.to_bytes(4, "big") + ctr.to_bytes(4, "big")).digest())
+            ctr += 1
+        for i in range(len(out)):
+            out[i] ^= ks[i]
+        return bytes(out)
+
     def _handle_request(self, opcode, sector, count, payload):
-        if opcode == proto.OP_INFO:
+        op = opcode & proto.OP_MASK
+        enc = bool(opcode & proto.FLAG_ENC)
+
+        if op == proto.OP_INFO:
             status = proto.STATUS_OK if self.card_present else proto.STATUS_ERROR
             resp_payload = self.sector_count.to_bytes(4, "little") + \
                 self.sector_size.to_bytes(4, "little")
             self._send_response(opcode, status, resp_payload)
             return
 
-        if opcode == proto.OP_READ:
+        if op == proto.OP_UNLOCK:
+            # Derive a session key from the passphrase (payload). count == len.
+            status = proto.STATUS_OK
+            if count == 0:
+                status = proto.STATUS_ERROR
+            else:
+                self._key = hashlib.sha256(payload).digest()
+            self._send_response(opcode, status, b"")
+            return
+
+        if op == proto.OP_READ:
             if count == 0 or count > proto.MAX_XFER_SECTORS:
                 self._send_response(opcode, proto.STATUS_BAD_FRAME, b"")
                 return
             data = bytearray(count * self.sector_size)
             status = proto.STATUS_OK
-            if not self.card_present:
+            if not self.card_present or (enc and self._key is None):
                 status = proto.STATUS_ERROR
             else:
                 for i in range(count):
                     sec = self.storage.get(sector + i, b"\x00" * self.sector_size)
+                    if enc:
+                        sec = self._sector_xform(sector + i, sec)
                     data[i * self.sector_size:(i + 1) * self.sector_size] = sec
             if status != proto.STATUS_OK:
                 data = bytearray(count * self.sector_size)  # zero-filled, matches main.c fix
             self._send_response(opcode, status, bytes(data))
             return
 
-        if opcode == proto.OP_WRITE:
+        if op == proto.OP_WRITE:
             if count == 0 or count > proto.MAX_XFER_SECTORS:
                 self._send_response(opcode, proto.STATUS_BAD_FRAME, b"")
                 return
             status = proto.STATUS_OK
-            if not self.card_present:
+            if not self.card_present or (enc and self._key is None):
                 status = proto.STATUS_ERROR
             else:
                 for i in range(count):
-                    self.storage[sector + i] = payload[i * self.sector_size:(i + 1) * self.sector_size]
+                    sec = payload[i * self.sector_size:(i + 1) * self.sector_size]
+                    if enc:
+                        sec = self._sector_xform(sector + i, sec)
+                    self.storage[sector + i] = sec
             self._send_response(opcode, status, b"")
             return
 
         self._send_response(opcode, proto.STATUS_BAD_FRAME, b"")
 
     def _send_response(self, opcode, status, payload):
-        body = bytes([0x80 | opcode, status]) + payload
+        # Echo the request opcode byte (flags included) with the response
+        # marker added, mirroring main.c's send_response().
+        body = bytes([proto.FLAG_RESP | opcode, status]) + payload
         crc = proto.crc16_ccitt(body)
         self._up_buf.extend(body + crc.to_bytes(2, "little"))

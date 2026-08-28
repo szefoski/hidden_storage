@@ -59,12 +59,17 @@ size_t rtt_proto_recv_frame(uint8_t *buf, size_t max_len)
 
 	recv_exact(buf, HEADER_LEN);
 
-	uint8_t opcode = buf[0];
+	/* Mask off the flag bits (ENC/RESP) to get the base opcode; only the
+	 * opcode determines how long the payload is. */
+	uint8_t op = buf[0] & RTT_PROTO_OP_MASK;
 	uint16_t count = rd_le16(&buf[5]);
 	size_t payload_len = 0;
 
-	if (opcode == RTT_PROTO_OP_WRITE) {
+	if (op == RTT_PROTO_OP_WRITE) {
 		payload_len = (size_t)count * SD_SECTOR_SIZE;
+	} else if (op == RTT_PROTO_OP_UNLOCK) {
+		/* count is the passphrase length in bytes. */
+		payload_len = count;
 	}
 
 	size_t total_len = HEADER_LEN + payload_len + CRC_LEN;

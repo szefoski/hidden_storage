@@ -12,6 +12,14 @@ MAX_XFER_SECTORS = 64
 OP_INFO = 0x00
 OP_READ = 0x01
 OP_WRITE = 0x02
+OP_UNLOCK = 0x03
+
+# Flag bits in the opcode byte. 0x80 marks a response (set by firmware); 0x40
+# asks the firmware to encrypt/decrypt a READ/WRITE with the session key set by
+# OP_UNLOCK. OP_MASK recovers the base opcode.
+FLAG_RESP = 0x80
+FLAG_ENC = 0x40
+OP_MASK = 0x3F
 
 STATUS_OK = 0x00
 STATUS_ERROR = 0x01

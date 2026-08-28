@@ -7,5 +7,6 @@ target_sources(app PRIVATE
   src/main.c
   src/rtt_proto.c
   src/sd_block.c
+  src/crypto.c
 )
 target_include_directories(app PRIVATE src)

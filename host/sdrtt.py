@@ -5,6 +5,8 @@ Speaks the same binary frame protocol as firmware/src/rtt_proto.c on RTT
 buffer index 1 (buffer 0 is left for the normal Zephyr log/console).
 """
 import argparse
+import getpass
+import os
 import sys
 import time
 from pathlib import Path
@@ -12,6 +14,10 @@ from pathlib import Path
 import pylink
 
 import protocol as proto
+
+# Env var checked for the encryption passphrase before falling back to an
+# interactive prompt, so encrypted transfers can be scripted.
+PASSPHRASE_ENV = "SDRTT_PASSPHRASE"
 
 RTT_CHANNEL = 1
 DEFAULT_DEVICE = "NRF54L15_M33"
@@ -125,19 +131,50 @@ def rtt_read_exact(jlink: pylink.JLink, length: int, timeout: float = 5.0) -> by
     return bytes(out)
 
 
-def transact(jlink, opcode, sector, count, payload=b"", expected_payload_len=0):
+def transact(jlink, opcode, sector, count, payload=b"", expected_payload_len=0,
+             read_timeout=5.0):
     req = proto.build_request(opcode, sector, count, payload)
     rtt_write_all(jlink, req)
 
     # response header: opcode|0x80 (1) + status (1)
-    header = rtt_read_exact(jlink, 2)
-    body_rest = rtt_read_exact(jlink, expected_payload_len + 2)  # payload + crc16
+    header = rtt_read_exact(jlink, 2, timeout=read_timeout)
+    body_rest = rtt_read_exact(jlink, expected_payload_len + 2, timeout=read_timeout)
     frame = header + body_rest
 
     resp_opcode, status, payload_out = proto.parse_response(frame)
+    # The firmware echoes the request opcode byte (flags included) with the
+    # response marker added; parse_response strips the marker, so this compares
+    # equal to what we sent, ENC flag and all.
     if resp_opcode != opcode:
         raise proto.ProtocolError(f"opcode mismatch: sent {opcode}, got {resp_opcode}")
     return status, payload_out
+
+
+def unlock(jlink, passphrase: str) -> None:
+    """Sends the passphrase to the firmware, which derives the session AES key
+    on-device (PBKDF2 on CRACEN). Raises RuntimeError if the firmware rejects
+    it. The passphrase length travels in the frame's `count` field, the bytes
+    in the payload."""
+    pw = passphrase.encode("utf-8")
+    if not pw:
+        raise RuntimeError("empty passphrase")
+    if len(pw) > 128:
+        raise RuntimeError("passphrase too long (max 128 bytes)")
+    # On-device PBKDF2 takes a couple of seconds; allow generous headroom so a
+    # slower run never trips the default per-transaction timeout.
+    status, _ = transact(jlink, proto.OP_UNLOCK, 0, len(pw), payload=pw, read_timeout=30.0)
+    if status != proto.STATUS_OK:
+        raise RuntimeError(f"unlock failed: {proto.status_name(status)}")
+
+
+def resolve_passphrase(args) -> str:
+    """Passphrase from --passphrase, else $SDRTT_PASSPHRASE, else a prompt."""
+    if getattr(args, "passphrase", None):
+        return args.passphrase
+    env = os.environ.get(PASSPHRASE_ENV)
+    if env:
+        return env
+    return getpass.getpass("Passphrase: ")
 
 
 def cmd_info(jlink, args):
@@ -185,18 +222,20 @@ def _print_progress(done: int, total: int) -> None:
           file=sys.stderr, flush=True)
 
 
-def raw_read_sectors(jlink, sector: int, count: int, progress=None) -> bytes:
+def raw_read_sectors(jlink, sector: int, count: int, progress=None, encrypt=False) -> bytes:
     """Reads `count` sectors starting at `sector`, chunked under the wire
     protocol's per-request cap. Raises RuntimeError on a non-OK status.
     If given, `progress(sectors_done, sectors_total)` is called after each
-    chunk."""
+    chunk. With encrypt=True, sets the ENC flag so the firmware decrypts each
+    sector with the session key (unlock() must have run first)."""
+    opcode = proto.OP_READ | (proto.FLAG_ENC if encrypt else 0)
     out = bytearray()
     remaining = count
     done = 0
     while remaining > 0:
         chunk = min(remaining, proto.MAX_XFER_SECTORS)
         status, payload = transact(
-            jlink, proto.OP_READ, sector, chunk,
+            jlink, opcode, sector, chunk,
             expected_payload_len=chunk * proto.SECTOR_SIZE,
         )
         if status != proto.STATUS_OK:
@@ -210,11 +249,13 @@ def raw_read_sectors(jlink, sector: int, count: int, progress=None) -> bytes:
     return bytes(out)
 
 
-def raw_write_sectors(jlink, sector: int, data: bytes, progress=None) -> None:
+def raw_write_sectors(jlink, sector: int, data: bytes, progress=None, encrypt=False) -> None:
     """Writes `data` (must already be a multiple of SECTOR_SIZE) starting at
     `sector`, chunked under the wire protocol's per-request cap.
     If given, `progress(sectors_done, sectors_total)` is called after each
-    chunk."""
+    chunk. With encrypt=True, sets the ENC flag so the firmware encrypts each
+    sector with the session key (unlock() must have run first)."""
+    opcode = proto.OP_WRITE | (proto.FLAG_ENC if encrypt else 0)
     total_sectors = len(data) // proto.SECTOR_SIZE
     off = 0
     remaining = total_sectors
@@ -222,7 +263,7 @@ def raw_write_sectors(jlink, sector: int, data: bytes, progress=None) -> None:
     while remaining > 0:
         chunk = min(remaining, proto.MAX_XFER_SECTORS)
         payload = data[off:off + chunk * proto.SECTOR_SIZE]
-        status, _ = transact(jlink, proto.OP_WRITE, sector, chunk, payload=payload)
+        status, _ = transact(jlink, opcode, sector, chunk, payload=payload)
         if status != proto.STATUS_OK:
             raise RuntimeError(f"WRITE failed at sector {sector}: {proto.status_name(status)}")
         sector += chunk
@@ -245,7 +286,16 @@ def _progress_for(total_sectors: int):
 def cmd_write(jlink, args):
     """Writes a file starting at `sector`, prefixed with a length header so
     `read` can later recover exactly how many bytes/sectors to fetch without
-    being told."""
+    being told. With --encrypt, the firmware encrypts every sector (header
+    included) on the card."""
+    encrypt = getattr(args, "encrypt", False)
+    if encrypt:
+        try:
+            unlock(jlink, resolve_passphrase(args))
+        except RuntimeError as e:
+            print(e, file=sys.stderr)
+            return 1
+
     file_data = Path(args.input).read_bytes()
 
     blob = proto.build_header(len(file_data)) + file_data
@@ -253,35 +303,49 @@ def cmd_write(jlink, args):
     blob = blob.ljust(total_sectors * proto.SECTOR_SIZE, b"\x00")
 
     try:
-        raw_write_sectors(jlink, args.sector, blob, progress=_progress_for(total_sectors))
+        raw_write_sectors(jlink, args.sector, blob,
+                          progress=_progress_for(total_sectors), encrypt=encrypt)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
 
     print(f"Wrote {len(file_data)} bytes ({total_sectors} sectors) "
-          f"starting at sector {args.sector} <- {args.input}")
+          f"{'encrypted ' if encrypt else ''}starting at sector {args.sector} <- {args.input}")
     return 0
 
 
 def cmd_read(jlink, args):
     """Reads back a file previously written with `write`. Discovers the
-    length from the header `write` embedded, so no count is needed."""
+    length from the header `write` embedded, so no count is needed. With
+    --encrypt, the firmware decrypts every sector; the passphrase must match
+    the one used to write, or the header won't validate."""
+    encrypt = getattr(args, "encrypt", False)
+    if encrypt:
+        try:
+            unlock(jlink, resolve_passphrase(args))
+        except RuntimeError as e:
+            print(e, file=sys.stderr)
+            return 1
+
     try:
-        header_sector = raw_read_sectors(jlink, args.sector, 1)
+        header_sector = raw_read_sectors(jlink, args.sector, 1, encrypt=encrypt)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
 
     ok, length = proto.parse_header(header_sector)
     if not ok:
-        print(f"No valid header at sector {args.sector} -- was this written with "
-              f"`sdrtt.py write`? For sectors written another way, use `raw-read`.",
+        hint = ("wrong passphrase, or " if encrypt else "")
+        print(f"No valid header at sector {args.sector} -- {hint}was this written with "
+              f"`sdrtt.py write`{' --encrypt' if encrypt else ''}? "
+              f"For sectors written another way, use `raw-read`.",
               file=sys.stderr)
         return 1
 
     total_sectors = (proto.HEADER_LEN + length + proto.SECTOR_SIZE - 1) // proto.SECTOR_SIZE
     try:
-        blob = raw_read_sectors(jlink, args.sector, total_sectors, progress=_progress_for(total_sectors))
+        blob = raw_read_sectors(jlink, args.sector, total_sectors,
+                                progress=_progress_for(total_sectors), encrypt=encrypt)
     except RuntimeError as e:
         print(e, file=sys.stderr)
         return 1
@@ -290,7 +354,7 @@ def cmd_read(jlink, args):
     Path(args.output).write_bytes(file_data)
 
     print(f"Read {length} bytes ({total_sectors} sectors) "
-          f"from sector {args.sector} -> {args.output}")
+          f"{'encrypted ' if encrypt else ''}from sector {args.sector} -> {args.output}")
     return 0
 
 
@@ -358,15 +422,24 @@ def build_parser():
 
     sub.add_parser("info", help="print sector size and sector count")
 
+    def add_encrypt_opts(sp):
+        sp.add_argument("-e", "--encrypt", action="store_true",
+                        help="encrypt/decrypt on the device (CRACEN). Passphrase from "
+                             f"--passphrase, ${PASSPHRASE_ENV}, or an interactive prompt")
+        sp.add_argument("--passphrase",
+                        help=f"encryption passphrase (else ${PASSPHRASE_ENV} or a prompt)")
+
     p_read = sub.add_parser(
         "read", help="read back a file previously written with `write` (size is auto-detected)")
     p_read.add_argument("sector", type=_sector_type, help=_SECTOR_HELP)
     p_read.add_argument("-o", "--output", required=True)
+    add_encrypt_opts(p_read)
 
     p_write = sub.add_parser(
         "write", help="write a file starting at sector (embeds a length header for `read`)")
     p_write.add_argument("sector", type=_sector_type, help=_SECTOR_HELP)
     p_write.add_argument("-i", "--input", required=True)
+    add_encrypt_opts(p_write)
 
     p_raw_read = sub.add_parser(
         "raw-read", help="read an explicit sector count, no header (for data not written by `write`)")
@@ -385,6 +458,9 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    if getattr(args, "passphrase", None) and not getattr(args, "encrypt", False):
+        print("note: --passphrase given without --encrypt; ignoring it and "
+              "transferring in plaintext.", file=sys.stderr)
     jlink = connect(args.device)
     try:
         if args.cmd == "info":

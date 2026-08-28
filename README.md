@@ -218,11 +218,52 @@ If `pylink`/the J-Link DLL fails to load, `sdrtt.py` now prints a direct
 pointer to the J-Link Software Pack download instead of pylink's raw error
 (same fix applies on Linux/macOS).
 
+### Encryption (optional)
+
+`write` and `read` take `-e`/`--encrypt` to encrypt the payload **on the
+device**, using the nRF54L15's CRACEN hardware crypto engine (PSA Crypto API).
+The host does no crypto and the SD card stores only ciphertext, so imaging the
+card reveals nothing without the passphrase.
+
+```sh
+# passphrase from an env var (scriptable):
+SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py write 2M -e -i secret.bin
+SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py read  2M -e -o out.bin
+# or --passphrase, or an interactive prompt if neither is given:
+sdrtt.py write 2M -e -i secret.bin      # prompts: Passphrase:
+```
+
+How it works and what it protects:
+
+- **Passphrase → key on-device.** The host sends the passphrase over the local
+  J-Link/RTT link; the DK runs PBKDF2-HMAC-SHA256 (on CRACEN) to derive a
+  256-bit key, held in RAM for the session only and never written to flash.
+  This costs a one-time ~2 s per invocation.
+- **AES-256-CTR, keyed per sector.** Each 512-byte sector is encrypted under an
+  IV derived from its absolute sector number, so ciphertext is the same size as
+  plaintext (the card stays 1:1) and any sector is independently accessible.
+- **Confidentiality, not integrity.** This defends against someone reading the
+  card's raw bytes, not against active tampering (no authentication tag).
+- **Encryption is opt-in and per command.** Without `-e`, `write`/`read` behave
+  exactly as before (plaintext), and `raw-read`/`dump`/`restore` are always raw
+  — which is how you can verify the card holds ciphertext:
+  `raw-read <sector> <n> -o ct.bin` on encrypted sectors returns random-looking
+  bytes with no `HSD1` header.
+- **Threat-model caveats.** The passphrase is the real defense — use a strong
+  one, since an attacker brute-forcing offline against the card runs the same
+  PBKDF2 on faster hardware. The KDF salt is currently a fixed build-time
+  constant (see `firmware/src/crypto.c`): simple and adequate for a single-user
+  store, but it means the same passphrase yields the same key on every unit of
+  this firmware. A random per-card salt stored in a reserved sector can be
+  added later without a wire-protocol change.
+
 ### Usage notes (all platforms)
 
 `write` prepends a 12-byte header (`HSD1` magic + 8-byte length) before the
 file's bytes, so `read` can recover exactly how many bytes/sectors to fetch
-without being told a count. This lives only in `host/protocol.py`
+without being told a count. When `--encrypt` is used the header is written
+through the encrypted path too, so it is stored encrypted and a `read` with the
+wrong passphrase simply fails to find a valid header. This lives only in `host/protocol.py`
 (`build_header`/`parse_header`) — the firmware and the RTT wire protocol
 don't know about it, they just move raw sectors. `dump`/`restore` bypass this
 entirely for byte-exact whole-card images. For sectors written some other

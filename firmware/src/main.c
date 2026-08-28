@@ -6,6 +6,7 @@
 
 #include "rtt_proto.h"
 #include "sd_block.h"
+#include "crypto.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
 
@@ -237,6 +238,10 @@ int main(void)
 		LOG_ERR("SD init failed (%d) -- RTT link still up, INFO/READ/WRITE will report errors", rc);
 	}
 
+	if (crypto_init() != 0) {
+		LOG_ERR("crypto init failed -- encrypted READ/WRITE will report errors");
+	}
+
 	rtt_proto_init();
 	LOG_INF("Hidden SD relay ready on RTT channel %d", RTT_PROTO_CHANNEL);
 
@@ -247,11 +252,16 @@ int main(void)
 			continue; /* framing/CRC error, or nothing to do yet */
 		}
 
+		/* The received opcode byte carries the ENC flag in its high nibble;
+		 * keep it intact for the response (so the host's opcode echo check
+		 * passes) but switch on the masked base opcode. */
 		uint8_t opcode = req_buf[0];
+		uint8_t op = opcode & RTT_PROTO_OP_MASK;
+		bool enc = (opcode & RTT_PROTO_FLAG_ENC) != 0;
 		uint32_t sector = rd_le32(&req_buf[1]);
 		uint16_t count = rd_le16(&req_buf[5]);
 
-		switch (opcode) {
+		switch (op) {
 		case RTT_PROTO_OP_INFO: {
 			uint32_t sector_count = 0, sector_size = 0;
 			uint8_t payload[8];
@@ -283,6 +293,18 @@ int main(void)
 			if (rc != 0 || sd_block_read(sector, count, RSP_PAYLOAD) != 0) {
 				status = RTT_PROTO_STATUS_ERROR;
 				memset(RSP_PAYLOAD, 0, payload_len);
+			} else if (enc) {
+				/* Decrypt each sector in place, keyed by its absolute
+				 * sector number. A locked/failed key fails the whole
+				 * request rather than returning ciphertext as if OK. */
+				for (uint32_t i = 0; i < count; i++) {
+					if (crypto_decrypt_sector(sector + i,
+							RSP_PAYLOAD + i * SD_SECTOR_SIZE) != 0) {
+						status = RTT_PROTO_STATUS_ERROR;
+						memset(RSP_PAYLOAD, 0, payload_len);
+						break;
+					}
+				}
 			}
 			send_response_in_place(opcode, status, payload_len);
 			break;
@@ -294,7 +316,29 @@ int main(void)
 			}
 			uint8_t status = RTT_PROTO_STATUS_OK;
 
-			if (rc != 0 || sd_block_write(sector, count, &req_buf[7]) != 0) {
+			if (enc) {
+				/* Encrypt each sector of the request payload in place
+				 * before writing it to the card. */
+				for (uint32_t i = 0; i < count; i++) {
+					if (crypto_encrypt_sector(sector + i,
+							&req_buf[7] + i * SD_SECTOR_SIZE) != 0) {
+						status = RTT_PROTO_STATUS_ERROR;
+						break;
+					}
+				}
+			}
+			if (status == RTT_PROTO_STATUS_OK &&
+			    (rc != 0 || sd_block_write(sector, count, &req_buf[7]) != 0)) {
+				status = RTT_PROTO_STATUS_ERROR;
+			}
+			send_response(opcode, status, NULL, 0);
+			break;
+		}
+		case RTT_PROTO_OP_UNLOCK: {
+			/* count = passphrase length, payload = passphrase bytes. */
+			uint8_t status = RTT_PROTO_STATUS_OK;
+
+			if (count == 0 || crypto_unlock(&req_buf[7], count) != 0) {
 				status = RTT_PROTO_STATUS_ERROR;
 			}
 			send_response(opcode, status, NULL, 0);
