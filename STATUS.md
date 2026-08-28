@@ -442,3 +442,17 @@ no setting, since it invites the assumption that a knob has been tried.
 
 Remaining RAM is dominated by the four unavoidable 32 KB buffers that scale
 with the chunk size: the two RTT ring buffers plus `req_buf` and `rsp_buf`.
+
+### Core "invisible to the OS" claim verified (2026-08-28)
+
+PLAN.md's headline requirement -- the host OS never sees a mass-storage
+device -- was finally tested against real hardware, and holds. With the DK
+actively reading the 16 GB SD card over RTT, the host's block-device list
+(`lsblk`, loop devices filtered out) is byte-for-byte identical before and
+during the transfer: no `mmcblk*`, no new `sd*`, and `journalctl -k` logs zero
+mmc/scsi/usb-storage events. The only removable device present is the DK's own
+10.7 MB J-Link firmware volume, which is there regardless.
+
+So the card is fully accessible to the firmware and the RTT host tool while
+being entirely absent from the operating system's storage stack, which is the
+whole purpose of the design.
