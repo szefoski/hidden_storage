@@ -412,3 +412,33 @@ overhead per exchange was eliminated.
 Going meaningfully faster needs a standalone J-Link probe that honours a
 higher SWD clock -- `SWD_SPEED_KHZ` in host/sdrtt.py already requests it. The
 SD bus itself is not the constraint: at 8 MHz it can sustain roughly 1 MB/s.
+
+### RAM cleanup (2026-08-28)
+
+RAM dropped from 184 KB to 145 KB of 256 KB (70% -> 55%), flash from 57.8 KB
+to 55.0 KB, with no throughput change and a 5 MiB round-trip still verified
+byte-identical.
+
+Three changes:
+
+- **The READ path no longer stages sector data twice.** `main.c` used to read
+  into a private `data[]` buffer and then memcpy the whole payload into
+  `rsp_buf`. `sd_block_read()` now writes straight into the response frame's
+  payload area via a new `send_response_in_place()`, removing a
+  `SD_BLOCK_MAX_XFER_SECTORS * SD_SECTOR_SIZE` buffer (32 KB) and a 32 KB copy
+  per read. The WRITE path never had this detour -- it already handed
+  `&req_buf[7]` straight to `sd_block_write()`.
+- `CONFIG_SD_LOG_LEVEL_DBG` back to `INF`. DBG logs every SD command; it was
+  what exposed the corrupt CSD during bring-up, but it is high volume and
+  costs time on every transfer.
+- `CONFIG_LOG_BUFFER_SIZE` 8192 -> 2048, which was only large to cope with
+  DBG-level volume.
+
+Also removed `CONFIG_LOG_BACKEND_RTT_BUFFER_SIZE=8192`: **it is not a real
+Kconfig symbol**. It never appeared in the generated `.config` and had no
+effect -- the RTT log channel is sized by `CONFIG_SEGGER_RTT_BUFFER_SIZE_UP`,
+still at its 1024 default. A setting that silently does nothing is worse than
+no setting, since it invites the assumption that a knob has been tried.
+
+Remaining RAM is dominated by the four unavoidable 32 KB buffers that scale
+with the chunk size: the two RTT ring buffers plus `req_buf` and `rsp_buf`.

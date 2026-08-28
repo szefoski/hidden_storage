@@ -168,23 +168,40 @@ static void wr_le32(uint8_t *p, uint32_t v)
 }
 
 /* Appends status+payload to rsp_buf, appends CRC16, sends it. */
-static void send_response(uint8_t opcode, uint8_t status, const uint8_t *payload,
-			   size_t payload_len)
-{
-	size_t len = 0;
+/* Payload area of rsp_buf: everything after the opcode and status bytes. */
+#define RSP_PAYLOAD (&rsp_buf[2])
 
-	rsp_buf[len++] = (uint8_t)(0x80 | opcode);
-	rsp_buf[len++] = status;
-	if (payload_len > 0) {
-		memcpy(&rsp_buf[len], payload, payload_len);
-		len += payload_len;
-	}
+/* Wraps a payload the caller has ALREADY written into RSP_PAYLOAD with the
+ * frame header and CRC, then sends it.
+ *
+ * Split out from send_response() so a sector read can land straight in the
+ * response buffer. Previously the READ path staged the data in a second
+ * full-size buffer and then memcpy'd it here, which cost an extra
+ * SD_BLOCK_MAX_XFER_SECTORS*SD_SECTOR_SIZE of RAM (32KB at the current chunk
+ * size) plus a 32KB copy on every read. The WRITE path never needed the
+ * detour -- it already passes &req_buf[7] straight to sd_block_write(). */
+static void send_response_in_place(uint8_t opcode, uint8_t status, size_t payload_len)
+{
+	size_t len = 2 + payload_len;
+
+	rsp_buf[0] = (uint8_t)(0x80 | opcode);
+	rsp_buf[1] = status;
+
 	uint16_t crc = rtt_proto_crc16(rsp_buf, len);
 
 	wr_le16(&rsp_buf[len], crc);
 	len += 2;
 
 	rtt_proto_send_frame(rsp_buf, len);
+}
+
+static void send_response(uint8_t opcode, uint8_t status, const uint8_t *payload,
+			   size_t payload_len)
+{
+	if (payload_len > 0) {
+		memcpy(RSP_PAYLOAD, payload, payload_len);
+	}
+	send_response_in_place(opcode, status, payload_len);
 }
 
 int main(void)
@@ -253,18 +270,21 @@ int main(void)
 				send_response(opcode, RTT_PROTO_STATUS_BAD_FRAME, NULL, 0);
 				break;
 			}
-			/* The host always knows `count` (it's the caller's own request),
+			/* Read straight into the response frame's payload area, so the
+			 * sector data is never staged in a separate buffer and copied.
+			 *
+			 * The host always knows `count` (it's the caller's own request),
 			 * so it expects a count*SD_SECTOR_SIZE payload back regardless of
 			 * status -- zero-fill on error rather than omitting the payload,
 			 * so the response length never depends on success/failure. */
-			static uint8_t data[SD_BLOCK_MAX_XFER_SECTORS * SD_SECTOR_SIZE];
+			size_t payload_len = (size_t)count * SD_SECTOR_SIZE;
 			uint8_t status = RTT_PROTO_STATUS_OK;
 
-			if (rc != 0 || sd_block_read(sector, count, data) != 0) {
+			if (rc != 0 || sd_block_read(sector, count, RSP_PAYLOAD) != 0) {
 				status = RTT_PROTO_STATUS_ERROR;
-				memset(data, 0, (size_t)count * SD_SECTOR_SIZE);
+				memset(RSP_PAYLOAD, 0, payload_len);
 			}
-			send_response(opcode, status, data, (size_t)count * SD_SECTOR_SIZE);
+			send_response_in_place(opcode, status, payload_len);
 			break;
 		}
 		case RTT_PROTO_OP_WRITE: {
