@@ -7,7 +7,7 @@ import re
 import struct
 
 SECTOR_SIZE = 512
-MAX_XFER_SECTORS = 32
+MAX_XFER_SECTORS = 64
 
 OP_INFO = 0x00
 OP_READ = 0x01

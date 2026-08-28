@@ -15,6 +15,9 @@ import protocol as proto
 
 RTT_CHANNEL = 1
 DEFAULT_DEVICE = "NRF54L15_M33"
+# SWD clock for the debug probe, in kHz. RTT throughput scales almost linearly
+# with this; 2000 is the J-Link default and was the transfer bottleneck.
+SWD_SPEED_KHZ = 16000
 
 
 def connect(device: str) -> pylink.JLink:
@@ -33,6 +36,21 @@ def connect(device: str) -> pylink.JLink:
     try:
         jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
         jlink.connect(device)
+        # RTT moves data by having the debug probe read target RAM over SWD,
+        # so the SWD clock -- not the SPI bus and not this protocol -- is the
+        # hard ceiling on throughput. SWD needs roughly 50 clock cycles per
+        # 32-bit word, so 2MHz works out to about 160KB/s of theoretical
+        # bandwidth, which brackets the ~98KB/s measured here.
+        #
+        # The nRF54L15-DK's on-board J-Link is FIXED at 2MHz: requesting
+        # anything higher is accepted silently, still reports 2000kHz, and
+        # measurably changes nothing (4MiB took 42.74s either way). This call
+        # is kept because a standalone J-Link probe does honour it, and that
+        # is the only way to go faster than ~98KB/s here.
+        try:
+            jlink.set_speed(SWD_SPEED_KHZ)
+        except pylink.errors.JLinkException:
+            pass  # keep the probe's default rather than failing the connection
         jlink.rtt_start()
     except pylink.errors.JLinkException as e:
         sys.exit(
@@ -88,7 +106,7 @@ def rtt_write_all(jlink: pylink.JLink, data: bytes) -> None:
     while buf:
         n = jlink.rtt_write(RTT_CHANNEL, buf)
         if n == 0:
-            time.sleep(0.005)
+            time.sleep(0.0002)
             continue
         buf = buf[n:]
 
@@ -103,7 +121,7 @@ def rtt_read_exact(jlink: pylink.JLink, length: int, timeout: float = 5.0) -> by
             continue
         if time.time() > deadline:
             raise TimeoutError(f"RTT read timed out ({len(out)}/{length} bytes)")
-        time.sleep(0.005)
+        time.sleep(0.0002)
     return bytes(out)
 
 

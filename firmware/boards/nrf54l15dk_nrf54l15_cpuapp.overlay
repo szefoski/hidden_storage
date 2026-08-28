@@ -120,10 +120,12 @@
 		reg = <0>;
 		status = "okay";
 		/* Card identification always runs at 400kHz regardless of this
-		 * value; it only caps the post-init clock. 4MHz is conservative
-		 * for jumper-wire wiring (spi22's ceiling is 8MHz) -- raise once
-		 * the link is proven and the wiring is short/soldered. */
-		spi-max-frequency = <4000000>;
+		 * value; it only caps the post-init clock. 8MHz is spi22's
+		 * ceiling (16MHz base clock, minimum prescaler of 2). The
+		 * earlier 4MHz setting was a guess from when the link was
+		 * believed to be marginal; the real fault was a 1.8V supply, so
+		 * there is no reason to stay below the peripheral's limit. */
+		spi-max-frequency = <8000000>;
 
 		mmc {
 			compatible = "zephyr,sdmmc-disk";

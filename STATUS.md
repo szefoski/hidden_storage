@@ -380,3 +380,35 @@ its SPI mode was broken -- were wrong. Both cards are genuine and both work.
 The lesson worth keeping: a reading can be perfectly self-consistent and still
 be entirely wrong if the measurement conditions are out of spec. Confirm supply
 voltage before interpreting any register content.
+
+## Throughput tuning (2026-08-28)
+
+Measured on a 4 MiB round-trip, verified byte-identical each time:
+
+| Setting | Write | Read |
+|---|---|---|
+| 32-sector chunks, 4 MHz SPI, 1ms/5ms polls | 51.1 s (82 KB/s) | 53.4 s (79 KB/s) |
+| 64-sector chunks, 8 MHz SPI, 100us/0.2ms polls | 42.7 s (98 KB/s) | 45.3 s (93 KB/s) |
+
+About 20% faster. Changes: `SD_BLOCK_MAX_XFER_SECTORS` 32 -> 64 (with
+`MAX_XFER_SECTORS` in host/protocol.py kept in step), poll sleeps cut from
+1 ms (firmware) and 5 ms (host) to 100 us and 0.2 ms, and `spi-max-frequency`
+raised from 4 MHz to spi22's 8 MHz ceiling. RAM went from 102 KB to 184 KB of
+256 KB, since five buffers scale with the chunk size.
+
+**The remaining limit is the debug probe, not this project.** RTT works by
+having the probe read target RAM over SWD, so the SWD clock caps throughput.
+The DK's on-board J-Link is fixed at 2 MHz: requesting 4/8/12/16 MHz is
+accepted silently, still reports 2000 kHz, and changes the measured time not
+at all (4 MiB took 42.74 s either way). At roughly 50 SWD clocks per 32-bit
+word, 2 MHz gives about 160 KB/s theoretical, which brackets the ~98 KB/s
+observed.
+
+Doubling the chunk size only bought ~20% rather than ~50%, which confirms the
+cost is per-byte (link bandwidth) rather than per-round-trip (latency): a
+16 KB chunk took 200 ms, a 32 KB chunk takes 334 ms, so only ~66 ms of fixed
+overhead per exchange was eliminated.
+
+Going meaningfully faster needs a standalone J-Link probe that honours a
+higher SWD clock -- `SWD_SPEED_KHZ` in host/sdrtt.py already requests it. The
+SD bus itself is not the constraint: at 8 MHz it can sustain roughly 1 MB/s.

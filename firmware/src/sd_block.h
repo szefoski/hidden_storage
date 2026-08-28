@@ -8,7 +8,7 @@
 #define SD_SECTOR_SIZE 512U
 
 /* Caps a single READ/WRITE request so the RTT buffers have a fixed max size. */
-#define SD_BLOCK_MAX_XFER_SECTORS 32U
+#define SD_BLOCK_MAX_XFER_SECTORS 64U
 
 /* Initializes the disk_access backend. Returns 0 on success. */
 int sd_block_init(void);

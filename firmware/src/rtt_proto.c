@@ -44,7 +44,7 @@ static void recv_exact(uint8_t *dst, size_t len)
 	while (got < len) {
 		unsigned n = SEGGER_RTT_Read(RTT_PROTO_CHANNEL, dst + got, len - got);
 		if (n == 0) {
-			k_sleep(K_MSEC(1));
+			k_sleep(K_USEC(100));
 			continue;
 		}
 		got += n;
@@ -102,7 +102,7 @@ void rtt_proto_send_frame(const uint8_t *buf, size_t len)
 	while (sent < len) {
 		unsigned n = SEGGER_RTT_Write(RTT_PROTO_CHANNEL, buf + sent, len - sent);
 		if (n == 0) {
-			k_sleep(K_MSEC(1));
+			k_sleep(K_USEC(100));
 			continue;
 		}
 		sent += n;

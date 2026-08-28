@@ -112,18 +112,23 @@ def test_dump_restore_roundtrip():
 
 
 def test_progress_callback_fires_for_multi_chunk_transfer():
+    # Derived from MAX_XFER_SECTORS rather than hardcoded, so this keeps
+    # testing "spans exactly two chunks" if the per-request cap is retuned
+    # for throughput (it has been: 32 -> 64).
+    chunk = proto.MAX_XFER_SECTORS
+    total = chunk + 18
     fw = FakeFirmware(card_present=True)
     calls = []
-    data = b"\x42" * (50 * proto.SECTOR_SIZE)  # 50 sectors, > MAX_XFER_SECTORS (32)
+    data = b"\x42" * (total * proto.SECTOR_SIZE)
 
-    sdrtt.raw_write_sectors(fw, 0, data, progress=lambda done, total: calls.append((done, total)))
+    sdrtt.raw_write_sectors(fw, 0, data, progress=lambda done, total_: calls.append((done, total_)))
 
-    # Two chunks: 32 sectors then the remaining 18.
-    assert calls == [(32, 50), (50, 50)]
+    # Two chunks: a full one, then the remaining 18 sectors.
+    assert calls == [(chunk, total), (total, total)]
 
     calls.clear()
-    sdrtt.raw_read_sectors(fw, 0, 50, progress=lambda done, total: calls.append((done, total)))
-    assert calls == [(32, 50), (50, 50)]
+    sdrtt.raw_read_sectors(fw, 0, total, progress=lambda done, total_: calls.append((done, total_)))
+    assert calls == [(chunk, total), (total, total)]
 
 
 def test_progress_for_skips_single_chunk_transfers():
