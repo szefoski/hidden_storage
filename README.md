@@ -1,299 +1,142 @@
 # Hidden SD Storage via nRF54L15-DK
 
-See [PLAN.md](PLAN.md) for the full architecture and design rationale.
+An nRF54L15-DK sits between a host and a microSD card as a J-Link RTT command
+target — not a USB mass-storage device. The card never enumerates on the host,
+so the storage is invisible unless you have the board, the J-Link tools, and
+this repo's `host/` client. See [PLAN.md](PLAN.md) for the architecture,
+[STATUS.md](STATUS.md) for the build log, and
+[LESSONS_LEARNED.md](LESSONS_LEARNED.md) for the debugging story behind the
+wiring/voltage requirements below.
 
-## Toolchain setup (done once)
+## Prerequisites
 
-Installed via nRF Util (Nordic's current official installer):
-
-```sh
-curl -sL "https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil" -o ~/.local/bin/nrfutil
-chmod +x ~/.local/bin/nrfutil
-nrfutil install sdk-manager
-nrfutil sdk-manager install v3.4.0   # NCS v3.4.0 (Zephyr 4.4), installs to ~/ncs/v3.4.0
-```
-
-J-Link tools (`JLinkExe`, RTT support) must already be installed separately —
-[SEGGER's J-Link Software Pack](https://www.segger.com/downloads/jlink/) —
-used here for both flashing and the RTT command link.
-
-## Building the firmware
-
-The firmware app lives outside the `~/ncs/v3.4.0` west workspace, so point `west`
-at it explicitly. Run this from the repo root -- **the paths must be absolute**:
-`--chdir ~/ncs/v3.4.0` changes directory before `west` runs, so a relative
-`firmware/build` would resolve against `~/ncs/v3.4.0`, not this repo (and fail
-with "source directory firmware does not exist").
-
-```sh
-REPO="$(pwd)"
-nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- \
-  west build -b nrf54l15dk/nrf54l15/cpuapp \
-  -d "$REPO/firmware/build" \
-  "$REPO/firmware"
-```
-
-Confirmed working (NCS v3.4.0 / Zephyr 4.4.0): links cleanly at 54.5 KB flash /
-95 KB RAM. Two Kconfig gotchas found while getting this to build clean, already
-fixed in `firmware/prj.conf`:
-
-- The disk_access API (`disk_access_read/write/ioctl/init`) lives behind
-  `CONFIG_DISK_ACCESS`, not `CONFIG_DISK_DRIVERS` (which only pulls in the
-  low-level per-backend drivers and is auto-selected by `DISK_ACCESS` anyway).
-- The SD-over-SPI + SDMMC disk stack needs `CONFIG_SDMMC_STACK=y` (which
-  selects `CONFIG_SDHC`); `CONFIG_DISK_DRIVER_SDMMC` and `CONFIG_SPI_SDHC`
-  then default to `y` on their own once the devicetree overlay's
-  `zephyr,sdmmc-disk` / `zephyr,sdhc-spi-slot` nodes are present.
+- nRF54L15-DK
+- A microSD breakout board + card (tested against the Waveshare 3947)
+- [SEGGER J-Link Software Pack](https://www.segger.com/downloads/jlink/) —
+  needed on every machine that builds/flashes the firmware *or* runs the host
+  tool
+- Python 3 (host tool only)
+- To build/flash the firmware: [nRF Util](https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil)
+  + NCS v3.4.0 (Linux only — see below)
 
 ## Wiring the SD card
 
-### FIRST: set the DK's supply voltage to 3.3 V
+**First, set the DK's supply to 3.3 V** — it ships at 1.8 V, which is below
+the SD spec (2.7-3.6 V) and causes confusing partial failures rather than a
+clean error. In nRF Connect for Desktop -> Board Configurator: select the DK,
+set VDD to 3.3 V, write, power-cycle. One-time, persists on the DK. Full story
+in [LESSONS_LEARNED.md](LESSONS_LEARNED.md).
 
-**The nRF54L15 DK ships configured for 1.8 V, and an SD card cannot work at
-1.8 V.** The SD specification requires 2.7-3.6 V. At 1.8 V a card will
-partially respond -- enough that initialisation looks like it is almost
-working -- while returning corrupt registers, nonsensical capacities, and
-failing every data transfer. This costs a great deal of debugging time if you
-do not know to check it, because nothing in the software reports "voltage".
+Then wire SCK/MOSI/MISO/CS/3V3/GND to these DK pins (fixed in
+`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` — override
+`cs-gpios`/`pinctrl-0`/`pinctrl-1` there if you wire it differently):
 
-Per the nRF54L15 DK Hardware User Guide: *"BUCK supplies nRF54L15 VDDM input
-with a default voltage of 1.8 V... To change the VDDM voltage, use the Board
-Configurator GUI."*
-
-To fix it: open **nRF Connect for Desktop** -> **Board Configurator** ->
-select the DK -> set **VDD to 3.3 V** -> write the configuration -> power
-cycle the board. Verify with a multimeter that VDD_IO to GND reads ~3.3 V
-before going further. This setting persists in the DK, so it only has to be
-done once.
-
-### Pin assignment
-
-`firmware/boards/nrf54l15dk_nrf54l15_cpuapp.overlay` uses `&spi22`. Note that
-it does **not** use spi22's stock default pins: those defaults (P1.06/P1.07)
-are the debugger's UART1 RTS/CTS lines, which are wired to the on-board
-interface MCU through analog switch U5 and therefore fight the SPI bus. See
-the overlay's header comment and STATUS.md for the full story.
-
-Peripheral-to-port routing is fixed in silicon (spi00->P2, spi20/21/22->P1,
-spi30->P0), and only spi20/21/22/30 can produce the 400 kHz that SD card
-identification requires -- spi00 runs from the 128 MHz PLL and bottoms out
-near 1 MHz, so it cannot drive an SD card at all.
-
-| SPI signal | DK pin | Note |
+| SPI signal | DK pin | Waveshare 3947 pin |
 |---|---|---|
-| SCK  | P1.12 | Free GPIO, no other function |
-| MOSI | P1.08 | Button 2 -- `&button2` is disabled in the overlay. Bare switch to GND, no pull-up or debounce capacitor, so electrically clean. **Do not press Button 2 while the card is in use**: it shorts MOSI to ground |
-| MISO | P1.11 | Free GPIO, no other function; the overlay adds an internal pull-up |
-| CS   | P1.14 | LED 3 -- `&led3` is disabled in the overlay. The LED is a MOSFET gate with a 1M resistor to GND, a negligible load on an output |
-| 3V3  | any VDD pin on the P0/P1/P2 header | must be 3.3 V -- see above |
-| GND  | any GND pin on the P0/P1/P2 header | see the DK's silkscreen |
+| SCK  | P1.12 | `CLK` |
+| MOSI | P1.08 | `CMD` |
+| MISO | P1.11 | `D0` |
+| CS   | P1.14 | `D3` (labeled `CD/D3`) |
+| 3V3  | any VDD pin, P0/P1/P2 header | `VDD`/`3,3V` |
+| GND  | any GND pin, P0/P1/P2 header | `VSS`/`GND` |
 
-Avoid P1.04-P1.07 and P0.00-P0.03 entirely: those are the debugger's two
-virtual COM ports (Table 9 of the DK Hardware User Guide) and are physically
-connected to the interface MCU.
+Avoid P1.04-P1.07 and P0.00-P0.03 — those are the debugger's virtual COM
+ports and are physically wired to another chip on the board. The Waveshare
+board already has onboard pull-ups; no external resistors needed. No card
+wired up yet? The firmware still builds/flashes fine — `sdrtt.py info` just
+reports a clean init error until a card is connected.
 
-### Wired and tested against: Waveshare 3947 (Micro SD Storage Board)
-
-Its 9-pin header uses native SD-bus pin names, not SPI names -- same
-physical signals, different labels:
-
-| Board pin | SPI signal | DK pin |
-|---|---|---|
-| `CLK` | SCK  | P1.12 |
-| `CMD` | MOSI | P1.08 |
-| `D0`  | MISO | P1.11 |
-| `D3` (labeled `CD/D3`) | CS | P1.14 |
-| `VDD`/`3,3V` | 3V3 | any VDDIO/VCC pin |
-| `VSS`/`GND` | GND | any GND pin |
-| `D1`, `D2`, and the separate `CD` (card-detect switch) pin | -- | leave unconnected, not used in SPI mode |
-
-This board's [official schematic](https://files.waveshare.com/upload/8/83/Micro-SD-Storage-Board-Schematic.pdf)
-confirms it already has onboard 10K pull-up resistors (R1-R6) to 3.3V on
-`D0`/`D1`/`D2`/`D3`/`CMD`/`CLK`, plus one (R7) on the separate `CD` line --
-**no external pull-up resistors needed**, this board already has them.
-
-Wire your breakout module's SCK/MISO/MOSI/CS/3V3/GND to those DK pins,
-then build and flash (previous/next sections) -- no overlay changes needed
-for the default wiring above. If you wire it differently (a different
-breakout board, or different DK pins), override
-`cs-gpios`/`pinctrl-0`/`pinctrl-1` in the overlay to match.
-
-(If you're just testing the RTT link/board with no SD card wired up yet,
-none of this matters yet -- the overlay builds and flashes fine either way,
-`disk_access_init()` just reports a clean error at runtime, which is
-expected and already validated.)
-
-## Flashing
-
-Same absolute-path requirement as building:
+## Build and flash the firmware (Linux)
 
 ```sh
+# one-time toolchain install
+curl -sL "https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil" -o ~/.local/bin/nrfutil
+chmod +x ~/.local/bin/nrfutil
+nrfutil install sdk-manager
+nrfutil sdk-manager install v3.4.0
+
+# build (run from the repo root; paths must be absolute)
 REPO="$(pwd)"
+nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- \
+  west build -b nrf54l15dk/nrf54l15/cpuapp -d "$REPO/firmware/build" "$REPO/firmware"
+
+# flash
 nrfutil sdk-manager toolchain launch --ncs-version v3.4.0 --chdir ~/ncs/v3.4.0 -- \
   west flash -d "$REPO/firmware/build"
 ```
 
-## Host tool
+Only tested on Linux. The host tool below is cross-platform and doesn't need
+to run on the same machine that flashed the board — any machine with J-Link
+software, Python, and USB access to the flashed board can drive it.
 
-The `host/` scripts (`sdrtt.py`, `protocol.py`, `fake_firmware.py`) are pure
-Python and platform-agnostic -- all file I/O goes through `pathlib.Path`, and
-the only third-party dependency is [`pylink-square`](https://pypi.org/project/pylink-square/),
-which SEGGER's own tooling recommends and which ships official wheels for
-Linux, macOS, *and Windows*. The firmware/build/flash steps above are
-Linux-only as documented (that's what this dev machine runs), but the host
-tool itself doesn't need to run on the same machine that built/flashed the
-firmware -- once a board is flashed, anything with J-Link software, Python,
-and USB access to the board can drive it.
+## Host tool setup
 
-Requires [SEGGER's J-Link Software Pack](https://www.segger.com/downloads/jlink/)
-installed on whichever machine runs these (same requirement as above, any OS).
+The host tool (`host/sdrtt.py`) needs the [`pylink-square`](https://pypi.org/project/pylink-square/)
+package, installed into a venv (required on Debian/Ubuntu; works everywhere):
 
-### Linux / macOS
-
-Install into a venv (works everywhere; also the only option on Debian/Ubuntu,
-where `pip install` into system Python is blocked by PEP 668):
-
+**Linux / macOS**
 ```sh
 python3 -m venv host/.venv
 host/.venv/bin/pip install -r host/requirements.txt
 ```
 
-Everything below except `test_protocol.py` needs `pylink` (i.e. the venv) --
-`test_protocol.py` alone has no hardware/pylink dependency and also runs fine
-with a plain system `python3`.
-
-```sh
-python3 host/test_protocol.py             # hardware-free protocol round-trip tests
-host/.venv/bin/python host/test_sdrtt.py  # hardware-free command-logic tests, via a firmware simulator
-
-host/.venv/bin/python host/sdrtt.py info                        # requires flashed board connected via J-Link
-host/.venv/bin/python host/sdrtt.py write 1000 -i secret.bin    # write, starting at sector 1000
-host/.venv/bin/python host/sdrtt.py read  1000 -o out.bin       # read it back -- size is auto-detected
-host/.venv/bin/python host/sdrtt.py dump  -o full_card.img      # whole-card raw image
-host/.venv/bin/python host/sdrtt.py restore -i full_card.img    # write a whole-card image back
-```
-
-### Windows
-
-Same tools, same commands -- just Windows paths/venv layout. **Not tested on
-an actual Windows machine** (this project was built entirely on Linux); this
-is a direct translation of the Linux instructions, not independently verified.
-None of these commands are PowerShell- or cmd-specific (no `$env:`, no
-line-continuation), so both shells below use identical lines -- provided
-separately anyway so each is directly copy-pasteable without translating.
-
-**PowerShell:**
-
+**Windows (PowerShell or cmd)**
 ```powershell
 py -3 -m venv host\.venv
 host\.venv\Scripts\pip.exe install -r host\requirements.txt
-
-py -3 host\test_protocol.py                      # hardware-free, no venv needed
-host\.venv\Scripts\python.exe host\test_sdrtt.py  # hardware-free command-logic tests
-
-host\.venv\Scripts\python.exe host\sdrtt.py info
-host\.venv\Scripts\python.exe host\sdrtt.py write 1000 -i secret.bin
-host\.venv\Scripts\python.exe host\sdrtt.py read  1000 -o out.bin
-host\.venv\Scripts\python.exe host\sdrtt.py dump  -o full_card.img
-host\.venv\Scripts\python.exe host\sdrtt.py restore -i full_card.img
 ```
 
-**cmd.exe:**
-
-```bat
-py -3 -m venv host\.venv
-host\.venv\Scripts\pip.exe install -r host\requirements.txt
-
-py -3 host\test_protocol.py
-host\.venv\Scripts\python.exe host\test_sdrtt.py
-
-host\.venv\Scripts\python.exe host\sdrtt.py info
-host\.venv\Scripts\python.exe host\sdrtt.py write 1000 -i secret.bin
-host\.venv\Scripts\python.exe host\sdrtt.py read 1000 -o out.bin
-host\.venv\Scripts\python.exe host\sdrtt.py dump -o full_card.img
-host\.venv\Scripts\python.exe host\sdrtt.py restore -i full_card.img
-```
-
-If `pylink`/the J-Link DLL fails to load, `sdrtt.py` now prints a direct
-pointer to the J-Link Software Pack download instead of pylink's raw error
-(same fix applies on Linux/macOS).
-
-### Encryption (optional)
-
-`write` and `read` take `-e`/`--encrypt` to encrypt the payload **on the
-device**, using the nRF54L15's CRACEN hardware crypto engine (PSA Crypto API).
-The host does no crypto and the SD card stores only ciphertext, so imaging the
-card reveals nothing without the passphrase.
+Sanity check, no hardware needed:
 
 ```sh
-# passphrase from an env var (scriptable):
-SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py write 2M -e -i secret.bin
-SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py read  2M -e -o out.bin
-# or --passphrase, or an interactive prompt if neither is given:
-sdrtt.py write 2M -e -i secret.bin      # prompts: Passphrase:
+python3 host/test_protocol.py              # Linux/macOS
+host/.venv/bin/python host/test_sdrtt.py
+
+py -3 host\test_protocol.py                 # Windows
+host\.venv\Scripts\python.exe host\test_sdrtt.py
 ```
 
-How it works and what it protects:
+## Using the hidden storage
 
-- **Passphrase → key on-device.** The host sends the passphrase over the local
-  J-Link/RTT link; the DK runs PBKDF2-HMAC-SHA256 (on CRACEN) to derive a
-  256-bit key, held in RAM for the session only and never written to flash.
-  This costs a one-time ~2 s per invocation.
-- **AES-256-CTR, keyed per sector.** Each 512-byte sector is encrypted under an
-  IV derived from its absolute sector number, so ciphertext is the same size as
-  plaintext (the card stays 1:1) and any sector is independently accessible.
-- **Confidentiality, not integrity.** This defends against someone reading the
-  card's raw bytes, not against active tampering (no authentication tag).
-- **Encryption is opt-in and per command.** Without `-e`, `write`/`read` behave
-  exactly as before (plaintext), and `raw-read`/`dump`/`restore` are always raw
-  — which is how you can verify the card holds ciphertext:
-  `raw-read <sector> <n> -o ct.bin` on encrypted sectors returns random-looking
-  bytes with no `HSD1` header.
-- **Threat-model caveats.** The passphrase is the real defense — use a strong
-  one, since an attacker brute-forcing offline against the card runs the same
-  PBKDF2 on faster hardware. The KDF salt is currently a fixed build-time
-  constant (see `firmware/src/crypto.c`): simple and adequate for a single-user
-  store, but it means the same passphrase yields the same key on every unit of
-  this firmware. A random per-card salt stored in a reserved sector can be
-  added later without a wire-protocol change.
+Same commands on every platform — swap the Python invocation for your OS:
+`host/.venv/bin/python` (Linux/macOS) or `host\.venv\Scripts\python.exe`
+(Windows).
 
-### Usage notes (all platforms)
+```sh
+sdrtt.py info                        # card info; requires a flashed board over J-Link
+sdrtt.py write 1000 -i secret.bin    # write a file, starting at sector 1000
+sdrtt.py read  1000 -o out.bin       # read it back — size is auto-detected
+sdrtt.py dump  -o full_card.img      # whole-card raw image
+sdrtt.py restore -i full_card.img    # write a whole-card image back
+```
 
-`write` prepends a 12-byte header (`HSD1` magic + 8-byte length) before the
-file's bytes, so `read` can recover exactly how many bytes/sectors to fetch
-without being told a count. When `--encrypt` is used the header is written
-through the encrypted path too, so it is stored encrypted and a `read` with the
-wrong passphrase simply fails to find a valid header. This lives only in `host/protocol.py`
-(`build_header`/`parse_header`) — the firmware and the RTT wire protocol
-don't know about it, they just move raw sectors. `dump`/`restore` bypass this
-entirely for byte-exact whole-card images. For sectors written some other
-way, `raw-read <sector> <count> -o file` does an explicit-count read with no
-header involved.
+`sector` also accepts a size offset instead of a raw number — `2M`, `512K`,
+`1.5G` — e.g. `sdrtt.py write 2M -i secret.bin` == `sdrtt.py write 4096 -i
+secret.bin`. Default `--device` is `NRF54L15_M33`; override with
+`--device <name>` if your J-Link version doesn't accept it.
 
-Default `--device` is `NRF54L15_M33` — confirmed working against this DK's
-on-board J-Link (V9.32). If it isn't accepted by your J-Link version, override
-it: `sdrtt.py --device <name> info`.
+## Encryption (optional)
 
-**Sector size is 512 bytes**, the SD/SDHC/SDXC standard, hardcoded as
-`SECTOR_SIZE` in `host/protocol.py` and `SD_SECTOR_SIZE` in
-`firmware/src/sd_block.h`. You can check what a card actually reports via
-`sdrtt.py info`'s `sector_size=` output. Before any `read`/`write`/
-`raw-read`/`dump`/`restore`, the tool also queries this itself and refuses
-to proceed if it ever disagrees with the hardcoded value (a real card
-reporting something other than 512 essentially never happens with SD
-hardware, but silently doing the wrong sector-boundary math would be worse
-than refusing outright).
+`-e`/`--encrypt` on `write`/`read` encrypts the payload on-device (AES-256-CTR
+via CRACEN hardware crypto), keyed from a passphrase — the SD card only ever
+stores ciphertext.
 
-**`sector` accepts a size offset instead of a raw sector number** on
-`read`/`write`/`raw-read` — `2M`, `512K`, `1G` (decimals allowed, e.g.
-`1.5M`, case-insensitive, optional trailing `B`), converted to a sector
-number before anything else runs. `sdrtt.py write 2M -i secret.bin` is
-exactly `sdrtt.py write 4096 -i secret.bin`. An offset that isn't an exact
-multiple of 512 bytes is rejected with the nearest valid sector numbers on
-either side, rather than silently rounding.
+```sh
+SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py write 2M -e -i secret.bin
+SDRTT_PASSPHRASE='correct horse battery staple' sdrtt.py read  2M -e -o out.bin
+# or omit SDRTT_PASSPHRASE / --passphrase for an interactive prompt
+```
 
-Any `write`/`read`/`raw-read`/`dump`/`restore` transfer spanning more than
-one RTT request (>32 sectors, 16KB) prints a live progress bar to stderr
-(`[####------] 42% (21/50 sectors)`) so a large `dump` doesn't sit silent.
-Small transfers that finish in a single request don't show one -- not worth
-the noise.
+This protects confidentiality (the passphrase is the real defense — use a
+strong one) but not integrity — there's no tamper detection. Full threat
+model and design in [ENCRYPTION_PLAN.md](ENCRYPTION_PLAN.md).
+
+## Notes
+
+- Sector size is 512 bytes (SD/SDHC/SDXC standard); the tool self-checks this
+  against what the card reports and refuses to proceed if they disagree.
+- `write`/`read` prepend a small header so `read` knows the byte count
+  automatically; `raw-read <sector> <count> -o file` skips that for sectors
+  written some other way, and `dump`/`restore` always work byte-exact with no
+  header.
+- Transfers over 32 sectors (16 KB) print a progress bar to stderr.
