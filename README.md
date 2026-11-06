@@ -16,8 +16,9 @@ wiring/voltage requirements below.
   needed on every machine that builds/flashes the firmware *or* runs the host
   tool
 - Python 3 (host tool only)
-- To build/flash the firmware: [nRF Util](https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil)
-  + NCS v3.4.0 (Linux only — see below)
+- To flash the prebuilt firmware: [nRF Util](https://files.nordicsemi.com/artifactory/swtools/external/nrfutil/executables/x86_64-unknown-linux-gnu/nrfutil)
+  with its `device` command (`nrfutil install device`)
+- To build the firmware yourself: nRF Util + NCS v3.4.0 (Linux only — see below)
 
 ## Wiring the SD card
 
@@ -45,6 +46,23 @@ ports and are physically wired to another chip on the board. The Waveshare
 board already has onboard pull-ups; no external resistors needed. No card
 wired up yet? The firmware still builds/flashes fine — `sdrtt.py info` just
 reports a clean init error until a card is connected.
+
+## Flash the prebuilt firmware
+
+No SDK needed. Download `hidden_storage-nrf54l15dk-v1.0.hex` from the
+[v1.0 release](https://github.com/szefoski/hidden_storage/releases/tag/v1.0)
+(check it against the `.sha256` file there), then:
+
+```sh
+nrfutil device program --firmware hidden_storage-nrf54l15dk-v1.0.hex \
+  --options chip_erase_mode=ERASE_RANGES_TOUCHED_BY_FIRMWARE,verify=VERIFY_READ
+nrfutil device reset
+```
+
+With more than one board connected, add `--serial-number <SN>` to both
+commands (`nrfutil device list` shows it). The hex is built from commit
+`7a83e43` and includes the optional encryption. Changed the firmware source?
+Build it yourself instead (next section).
 
 ## Build and flash the firmware (Linux)
 
